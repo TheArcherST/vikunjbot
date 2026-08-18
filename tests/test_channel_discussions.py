@@ -20,13 +20,14 @@ class ChannelBot:
     def __init__(self, requester_status: str = "administrator") -> None:
         self.requester_status = requester_status
 
-    async def get_chat(self, _: int) -> SimpleNamespace:
+    async def get_chat(self, *, chat_id: int) -> SimpleNamespace:
+        assert chat_id == -100111
         return SimpleNamespace(id=-100111, type="channel", linked_chat_id=-100222)
 
     async def get_me(self) -> SimpleNamespace:
         return SimpleNamespace(id=999)
 
-    async def get_chat_member(self, chat_id: int, user_id: int) -> SimpleNamespace:
+    async def get_chat_member(self, *, chat_id: int, user_id: int) -> SimpleNamespace:
         if chat_id == -100111 and user_id == 12:
             return SimpleNamespace(status=self.requester_status)
         return SimpleNamespace(status=ChatMemberStatus.ADMINISTRATOR, can_post_messages=True)

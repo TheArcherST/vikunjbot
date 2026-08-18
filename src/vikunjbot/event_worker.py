@@ -113,7 +113,7 @@ class EventWorker:
         text = render_project_event(event.event_name, event.payload)
         for route in routes:
             if route.expires_at > utc_now():
-                await self._bot.send_message(route.chat_id, text)
+                await self._bot.send_message(chat_id=route.chat_id, text=text)
 
     async def _deliver_task(
         self, event: StoredEvent, task: dict[str, Any], route: DeliveryRoute
@@ -122,14 +122,18 @@ class EventWorker:
         existing = self._database.get_task_message(route.chat_id, event.task_id or 0)
         text = render_task(task)
         if existing is None:
-            sent = await self._bot.send_message(route.chat_id, text)
+            sent = await self._bot.send_message(chat_id=route.chat_id, text=text)
             message_id = sent.message_id
             previous_snapshot: dict[str, Any] = {}
         else:
             message_id = existing.message_id
             previous_snapshot = existing.snapshot
             try:
-                await self._bot.edit_message_text(text, route.chat_id, message_id)
+                await self._bot.edit_message_text(
+                    text=text,
+                    chat_id=route.chat_id,
+                    message_id=message_id,
+                )
             except TelegramBadRequest as exc:
                 # Telegram treats an idempotent edit as an error; retaining the
                 # mapping makes retrying a crashed delivery safe in that common case.
@@ -153,8 +157,8 @@ class EventWorker:
                 event.event_name, previous_snapshot, current_snapshot, event.payload
             )
             await self._bot.send_message(
-                route.chat_id,
-                summary,
+                chat_id=route.chat_id,
+                text=summary,
                 reply_parameters=ReplyParameters(message_id=message_id),
             )
 

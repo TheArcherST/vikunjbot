@@ -256,7 +256,7 @@ async def _set_comment_updates(
     if message.from_user is None or not is_group:
         await message.answer("Only a group administrator can change this setting in that group.")
         return
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    member = await bot.get_chat_member(chat_id=message.chat.id, user_id=message.from_user.id)
     if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
         await message.answer("Only a group administrator can change this setting.")
         return
@@ -277,14 +277,14 @@ async def _channel_discussion_from_forward(
         )
 
     try:
-        channel = await bot.get_chat(origin.chat.id)
+        channel = await bot.get_chat(chat_id=origin.chat.id)
         if channel.type != ChatType.CHANNEL:
             raise ChannelBindingError("the forwarded post does not belong to a channel")
         if channel.linked_chat_id is None:
             raise ChannelBindingError("enable a linked discussion group for the channel first")
 
         bot_user = await bot.get_me()
-        bot_in_channel = await bot.get_chat_member(channel.id, bot_user.id)
+        bot_in_channel = await bot.get_chat_member(chat_id=channel.id, user_id=bot_user.id)
         if not _is_administrator(bot_in_channel.status):
             raise ChannelBindingError(
                 "make the bot a channel administrator with permission to post"
@@ -292,11 +292,17 @@ async def _channel_discussion_from_forward(
         if getattr(bot_in_channel, "can_post_messages", True) is False:
             raise ChannelBindingError("give the bot permission to post in the channel")
 
-        requester_in_channel = await bot.get_chat_member(channel.id, requesting_user_id)
+        requester_in_channel = await bot.get_chat_member(
+            chat_id=channel.id,
+            user_id=requesting_user_id,
+        )
         if not _is_administrator(requester_in_channel.status):
             raise ChannelBindingError("only a channel administrator can install its webhook")
 
-        bot_in_discussion = await bot.get_chat_member(channel.linked_chat_id, bot_user.id)
+        bot_in_discussion = await bot.get_chat_member(
+            chat_id=channel.linked_chat_id,
+            user_id=bot_user.id,
+        )
         if not _is_administrator(bot_in_discussion.status):
             raise ChannelBindingError(
                 "make the bot an administrator in the linked discussion group too"

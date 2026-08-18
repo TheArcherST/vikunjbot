@@ -24,7 +24,7 @@ class FakeBot:
         self.sent.append((chat_id, text))
         return SentMessage(message_id=100 + len(self.sent))
 
-    async def edit_message_text(self, text: str, chat_id: int, message_id: int) -> None:
+    async def edit_message_text(self, *, text: str, chat_id: int, message_id: int) -> None:
         self.edited.append((chat_id, message_id, text))
 
 
