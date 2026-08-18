@@ -142,8 +142,13 @@ class EventWorker:
             route.expires_at,
             route.allowed_telegram_user_ids,
             current_snapshot,
+            discussion_chat_id=route.discussion_chat_id,
         )
-        if existing is not None and self._database.comment_updates_enabled(route.chat_id):
+        if (
+            existing is not None
+            and route.discussion_chat_id is None
+            and self._database.comment_updates_enabled(route.chat_id)
+        ):
             summary = change_summary(
                 event.event_name, previous_snapshot, current_snapshot, event.payload
             )

@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from vikunjbot.routing import InvalidRouteTag, make_route_tag, parse_route_tag
+from vikunjbot.routing import DeliveryRoute, InvalidRouteTag, make_route_tag, parse_route_tag
 
 
 def test_direct_route_grants_the_recipient_access() -> None:
@@ -37,3 +37,40 @@ def test_canonical_tag_can_target_a_group() -> None:
     assert make_route_tag(12345, "30m", -100987) == (
         "telegram-id:12345,telegram-chat-id:-100987,expiry:30m"
     )
+
+
+def test_channel_route_keeps_the_linked_discussion_as_an_access_boundary() -> None:
+    event_time = datetime(2026, 8, 18, 12, tzinfo=UTC)
+
+    routes = parse_route_tag(
+        "telegram-id:12345,telegram-channel-id:-100111,"
+        "telegram-discussion-chat-id:-100222,expiry:1d",
+        event_time,
+    )
+
+    assert routes == (
+        DeliveryRoute(
+            chat_id=-100111,
+            discussion_chat_id=-100222,
+            allowed_telegram_user_ids=frozenset({12345}),
+            expires_at=event_time + timedelta(days=1),
+        ),
+    )
+    assert (
+        make_route_tag(
+            12345,
+            "1d",
+            channel_id=-100111,
+            discussion_chat_id=-100222,
+        )
+        == "telegram-id:12345,telegram-channel-id:-100111,"
+        "telegram-discussion-chat-id:-100222,expiry:1d"
+    )
+
+
+def test_channel_route_requires_its_linked_discussion() -> None:
+    with pytest.raises(InvalidRouteTag, match="linked discussion"):
+        parse_route_tag(
+            "telegram-id:12345,telegram-channel-id:-100111,expiry:1d",
+            datetime(2026, 8, 18, tzinfo=UTC),
+        )

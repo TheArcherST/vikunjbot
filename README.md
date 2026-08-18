@@ -125,9 +125,18 @@ In the destination private chat or group, send `/webhook 1d`. It gives a target 
 to paste into the desired Vikunja project webhook. `/install_webhook <project-id> 1d`
 creates the same project webhook via the connected user's API token.
 
-For groups and channels, add the bot as an administrator so it can post and edit task
-messages. Use the task events selected by `/install_webhook`; task events emitted by
-an equivalent manually configured webhook work too.
+For a regular group, add the bot as an administrator so it can post and edit task
+messages. For a **channel with a linked discussion**, add the bot as a channel
+administrator with permission to post, and as an administrator in the linked discussion
+group too.
+Then, in a private chat with the bot, forward any post from that channel and reply to
+it with `/install_channel_webhook <project-id> [expiry]`.
+
+The bot verifies that the requester is a channel administrator, that the channel
+actually has a linked discussion, and that the bot can post in both required places.
+It then publishes task messages in the channel itself. Telegram's automatic forward
+creates the corresponding thread in the linked discussion, and replies in that thread
+are treated as replies to the channel task message — not as a separate group route.
 
 ## Stream tags and access boundary
 
@@ -139,13 +148,22 @@ http://vikunjbot-event-relay:8080/events/telegram-id:123456,telegram-chat-id:-10
 
 - `telegram-id` identifies the Telegram account allowed to act on that event.
   Without a `telegram-chat-id`, it is also the private-message recipient.
-- `telegram-chat-id` targets a group or channel. If present, it prevents an
-  additional private copy from being sent.
+- `telegram-chat-id` targets a regular group. If present, it prevents an additional
+  private copy from being sent.
+- `telegram-channel-id` together with `telegram-discussion-chat-id` targets a channel
+  and its one linked discussion. These directives are produced by
+  `/install_channel_webhook` after the Telegram-side checks above.
 - `expiry` is mandatory and supports positive `s`, `m`, `h`, `d`, and `w` values.
   Its deadline is calculated from Vikunja's event timestamp, not delivery time.
 
 A `telegram-chat-id` without a `telegram-id` is intentionally read-only. This keeps a
 copy-only channel from accidentally granting its members control over a task.
+
+For a channel route, the database records both the channel post and its verified linked
+discussion ID. A reply can trigger a Vikunja action only when it is under Telegram's
+automatic forward of that stored channel post in that exact discussion, and only from
+the `telegram-id` that installed the route. A manually forwarded post in another group
+does not pass this check.
 
 Only a reply to the persistent message of a routed task can initiate a Vikunja action.
 Before any such Telegram-originated action, the bot calls `GET /user` exactly once
@@ -169,7 +187,9 @@ Reply to a task message with any combination of:
 Task messages remain tied to a task ID, so later updates edit the same message even
 when its bucket or due date changes. In a group, an administrator can send
 `/enable_comment_updates`; updates then also generate a short reply under the task
-message. `/disable_comment_updates` reverses it.
+message. `/disable_comment_updates` reverses it. Channel routes deliberately omit
+these extra summaries: posting one separately would break Telegram's channel-to-
+discussion relationship; the original channel post is edited instead.
 
 Project update, deletion, and sharing events are also forwarded as standalone
 notifications. They do not represent a task and therefore have no reply-to-act mapping.

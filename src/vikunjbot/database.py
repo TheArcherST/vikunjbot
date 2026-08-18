@@ -27,6 +27,7 @@ class StoredEvent:
 @dataclass(frozen=True, slots=True)
 class TaskMessage:
     chat_id: int
+    discussion_chat_id: int | None
     task_id: int
     message_id: int
     expires_at: datetime
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS token_bindings (
 
 CREATE TABLE IF NOT EXISTS task_messages (
     chat_id INTEGER NOT NULL,
+    discussion_chat_id INTEGER,
     task_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
     expires_at TEXT NOT NULL,
@@ -109,6 +111,24 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:
             connection.executescript(_SCHEMA)
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(task_messages)").fetchall()
+            }
+            if "discussion_chat_id" not in columns:
+                try:
+                    connection.execute(
+                        "ALTER TABLE task_messages ADD COLUMN discussion_chat_id INTEGER"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS task_messages_by_discussion_reply
+                ON task_messages(discussion_chat_id, chat_id, message_id)
+                """
+            )
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -289,6 +309,9 @@ class Database:
             return None
         return TaskMessage(
             chat_id=int(row["chat_id"]),
+            discussion_chat_id=(
+                int(row["discussion_chat_id"]) if row["discussion_chat_id"] is not None else None
+            ),
             task_id=int(row["task_id"]),
             message_id=int(row["message_id"]),
             expires_at=from_db_time(str(row["expires_at"])),
@@ -308,6 +331,9 @@ class Database:
             return None
         return TaskMessage(
             chat_id=int(row["chat_id"]),
+            discussion_chat_id=(
+                int(row["discussion_chat_id"]) if row["discussion_chat_id"] is not None else None
+            ),
             task_id=int(row["task_id"]),
             message_id=int(row["message_id"]),
             expires_at=from_db_time(str(row["expires_at"])),
@@ -325,15 +351,17 @@ class Database:
         expires_at: datetime,
         allowed_telegram_user_ids: frozenset[int],
         snapshot: dict[str, Any],
+        discussion_chat_id: int | None = None,
     ) -> None:
         with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO task_messages (
-                    chat_id, task_id, message_id, expires_at, allowed_telegram_user_ids_json,
-                    snapshot_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    chat_id, discussion_chat_id, task_id, message_id, expires_at,
+                    allowed_telegram_user_ids_json, snapshot_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id, task_id) DO UPDATE SET
+                    discussion_chat_id = excluded.discussion_chat_id,
                     message_id = excluded.message_id,
                     expires_at = excluded.expires_at,
                     allowed_telegram_user_ids_json = excluded.allowed_telegram_user_ids_json,
@@ -342,6 +370,7 @@ class Database:
                 """,
                 (
                     chat_id,
+                    discussion_chat_id,
                     task_id,
                     message_id,
                     to_db_time(expires_at),
@@ -350,6 +379,32 @@ class Database:
                     to_db_time(utc_now()),
                 ),
             )
+
+    def find_discussion_task_message(
+        self, discussion_chat_id: int, channel_id: int, channel_message_id: int
+    ) -> TaskMessage | None:
+        """Find a channel post from its automatic forward in the linked discussion."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM task_messages
+                WHERE discussion_chat_id = ? AND chat_id = ? AND message_id = ?
+                """,
+                (discussion_chat_id, channel_id, channel_message_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return TaskMessage(
+            chat_id=int(row["chat_id"]),
+            discussion_chat_id=int(row["discussion_chat_id"]),
+            task_id=int(row["task_id"]),
+            message_id=int(row["message_id"]),
+            expires_at=from_db_time(str(row["expires_at"])),
+            allowed_telegram_user_ids=frozenset(
+                json.loads(str(row["allowed_telegram_user_ids_json"]))
+            ),
+            snapshot=json.loads(str(row["snapshot_json"])),
+        )
 
     def comment_updates_enabled(self, chat_id: int) -> bool:
         with self._connection() as connection:
