@@ -31,7 +31,10 @@ class Base(DeclarativeBase):
 class HookModel(Base):
     __tablename__ = "hooks"
     __table_args__ = (
-        CheckConstraint("target_chat_id <> 0", name="hooks_target_chat_id_not_zero"),
+        CheckConstraint(
+            "delivery_destination_chat_id <> 0",
+            name="hooks_delivery_destination_chat_id_not_zero",
+        ),
         CheckConstraint(
             "event_permission_ttl_seconds > 0", name="hooks_event_permission_ttl_positive"
         ),
@@ -39,8 +42,8 @@ class HookModel(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    target_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    discussion_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    delivery_destination_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    delivery_destination_discussion_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     allowed_telegram_user_ids: Mapped[list[int]] = mapped_column(JSONValue, nullable=False)
     event_permission_ttl_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, default=86_400
@@ -120,11 +123,15 @@ class TaskMessageModel(Base):
     __tablename__ = "task_messages"
     __table_args__ = (
         UniqueConstraint("hook_id", "task_id", name="task_messages_hook_task"),
-        Index("task_messages_by_reply", "chat_id", "message_id"),
         Index(
-            "task_messages_by_discussion_reply",
-            "discussion_chat_id",
-            "chat_id",
+            "task_messages_by_delivery_destination_message",
+            "delivery_destination_chat_id",
+            "message_id",
+        ),
+        Index(
+            "task_messages_by_delivery_destination_discussion_message",
+            "delivery_destination_discussion_chat_id",
+            "delivery_destination_chat_id",
             "message_id",
         ),
     )
@@ -135,13 +142,14 @@ class TaskMessageModel(Base):
         ForeignKey("hooks.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    discussion_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    delivery_destination_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    delivery_destination_discussion_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     task_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     message_id: Mapped[int] = mapped_column(Integer, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     allowed_telegram_user_ids: Mapped[list[int]] = mapped_column(JSONValue, nullable=False)
     snapshot: Mapped[dict[str, object]] = mapped_column(JSONValue, nullable=False)
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

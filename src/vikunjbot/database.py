@@ -44,11 +44,18 @@ class HookView:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryDestination:
+    """A Telegram chat where one hook delivers its task updates."""
+
+    chat_id: int
+    discussion_chat_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Hook:
     id: UUID
     project_id: int
-    chat_id: int
-    discussion_chat_id: int | None
+    delivery_destination: DeliveryDestination
     allowed_telegram_user_ids: frozenset[int]
     event_permission_ttl_seconds: int
     views: tuple[HookView, ...]
@@ -57,13 +64,13 @@ class Hook:
 @dataclass(frozen=True, slots=True)
 class TaskMessage:
     hook_id: UUID
-    chat_id: int
-    discussion_chat_id: int | None
+    delivery_destination: DeliveryDestination
     task_id: int
     message_id: int
     expires_at: datetime
     allowed_telegram_user_ids: frozenset[int]
     snapshot: dict[str, Any]
+    deleted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,17 +101,16 @@ class Database:
         self,
         *,
         project_id: int,
-        chat_id: int,
+        delivery_destination: DeliveryDestination,
         allowed_telegram_user_ids: frozenset[int],
         views: tuple[HookView, ...],
-        discussion_chat_id: int | None = None,
         event_permission_ttl_seconds: int = 86_400,
     ) -> Hook:
         now = utc_now()
         record = HookModel(
             project_id=project_id,
-            target_chat_id=chat_id,
-            discussion_chat_id=discussion_chat_id,
+            delivery_destination_chat_id=delivery_destination.chat_id,
+            delivery_destination_discussion_chat_id=delivery_destination.discussion_chat_id,
             allowed_telegram_user_ids=sorted(allowed_telegram_user_ids),
             event_permission_ttl_seconds=event_permission_ttl_seconds,
             created_at=now,
@@ -286,19 +292,24 @@ class Database:
             )
         return _task_message(record) if record is not None else None
 
-    async def find_task_message(self, chat_id: int, message_id: int) -> TaskMessage | None:
+    async def find_task_message_in_delivery_destination(
+        self, delivery_destination_chat_id: int, message_id: int
+    ) -> TaskMessage | None:
         return await self._find_task_message(
-            TaskMessageModel.chat_id == chat_id,
+            TaskMessageModel.delivery_destination_chat_id == delivery_destination_chat_id,
             TaskMessageModel.message_id == message_id,
         )
 
-    async def find_discussion_task_message(
-        self, discussion_chat_id: int, channel_id: int, channel_message_id: int
+    async def find_task_message_from_delivery_discussion(
+        self,
+        discussion_chat_id: int,
+        delivery_destination_chat_id: int,
+        delivery_destination_message_id: int,
     ) -> TaskMessage | None:
         return await self._find_task_message(
-            TaskMessageModel.discussion_chat_id == discussion_chat_id,
-            TaskMessageModel.chat_id == channel_id,
-            TaskMessageModel.message_id == channel_message_id,
+            TaskMessageModel.delivery_destination_discussion_chat_id == discussion_chat_id,
+            TaskMessageModel.delivery_destination_chat_id == delivery_destination_chat_id,
+            TaskMessageModel.message_id == delivery_destination_message_id,
         )
 
     async def _find_task_message(self, *criteria: object) -> TaskMessage | None:
@@ -306,7 +317,7 @@ class Database:
             record = await session.scalar(
                 select(TaskMessageModel)
                 .join(HookModel, TaskMessageModel.hook_id == HookModel.id)
-                .where(*criteria, HookModel.active.is_(True))
+                .where(*criteria, HookModel.active.is_(True), TaskMessageModel.deleted.is_(False))
             )
         return _task_message(record) if record is not None else None
 
@@ -314,29 +325,29 @@ class Database:
         self,
         *,
         hook_id: UUID,
-        chat_id: int,
+        delivery_destination: DeliveryDestination,
         task_id: int,
         message_id: int,
         expires_at: datetime,
         allowed_telegram_user_ids: frozenset[int],
         snapshot: dict[str, Any],
-        discussion_chat_id: int | None = None,
     ) -> None:
         now = utc_now()
         values = {
             "hook_id": hook_id,
-            "chat_id": chat_id,
-            "discussion_chat_id": discussion_chat_id,
+            "delivery_destination_chat_id": delivery_destination.chat_id,
+            "delivery_destination_discussion_chat_id": delivery_destination.discussion_chat_id,
             "task_id": task_id,
             "message_id": message_id,
             "expires_at": expires_at,
             "allowed_telegram_user_ids": sorted(allowed_telegram_user_ids),
             "snapshot": snapshot,
+            "deleted": False,
             "updated_at": now,
         }
         updates = {
-            "chat_id": chat_id,
-            "discussion_chat_id": discussion_chat_id,
+            "delivery_destination_chat_id": delivery_destination.chat_id,
+            "delivery_destination_discussion_chat_id": delivery_destination.discussion_chat_id,
             "message_id": message_id,
             "expires_at": expires_at,
             "allowed_telegram_user_ids": sorted(allowed_telegram_user_ids),
@@ -346,10 +357,24 @@ class Database:
         statement = (
             postgresql_insert(TaskMessageModel)
             .values(**values)
-            .on_conflict_do_update(constraint="task_messages_hook_task", set_=updates)
+            .on_conflict_do_update(
+                constraint="task_messages_hook_task",
+                set_=updates,
+                # Vikunja task IDs are never reused. A delayed task.updated event
+                # must not reactivate a mapping after task.deleted revoked it.
+                where=TaskMessageModel.deleted.is_(False),
+            )
         )
         async with self._sessions.begin() as session:
             await session.execute(statement)
+
+    async def mark_task_message_deleted(self, hook_id: UUID, task_id: int) -> None:
+        async with self._sessions.begin() as session:
+            await session.execute(
+                update(TaskMessageModel)
+                .where(TaskMessageModel.hook_id == hook_id, TaskMessageModel.task_id == task_id)
+                .values(deleted=True, updated_at=utc_now())
+            )
 
     async def comment_updates_enabled(self, chat_id: int) -> bool:
         async with self._sessions() as session:
@@ -399,8 +424,10 @@ def _hook(record: HookModel) -> Hook:
     return Hook(
         id=record.id,
         project_id=record.project_id,
-        chat_id=record.target_chat_id,
-        discussion_chat_id=record.discussion_chat_id,
+        delivery_destination=DeliveryDestination(
+            chat_id=record.delivery_destination_chat_id,
+            discussion_chat_id=record.delivery_destination_discussion_chat_id,
+        ),
         allowed_telegram_user_ids=frozenset(record.allowed_telegram_user_ids),
         event_permission_ttl_seconds=record.event_permission_ttl_seconds,
         views=tuple(
@@ -413,11 +440,14 @@ def _hook(record: HookModel) -> Hook:
 def _task_message(record: TaskMessageModel) -> TaskMessage:
     return TaskMessage(
         hook_id=record.hook_id,
-        chat_id=record.chat_id,
-        discussion_chat_id=record.discussion_chat_id,
+        delivery_destination=DeliveryDestination(
+            chat_id=record.delivery_destination_chat_id,
+            discussion_chat_id=record.delivery_destination_discussion_chat_id,
+        ),
         task_id=record.task_id,
         message_id=record.message_id,
         expires_at=record.expires_at,
         allowed_telegram_user_ids=frozenset(record.allowed_telegram_user_ids),
         snapshot=dict(record.snapshot),
+        deleted=record.deleted,
     )

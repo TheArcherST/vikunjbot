@@ -11,7 +11,13 @@ from aiogram.types import ReactionTypeEmoji, ReplyParameters
 
 from vikunjbot.database import Database, Hook, StoredEvent
 from vikunjbot.settings import Settings
-from vikunjbot.task_text import change_summary, render_project_event, render_task, task_snapshot
+from vikunjbot.task_text import (
+    change_summary,
+    render_deleted_task,
+    render_project_event,
+    render_task,
+    task_snapshot,
+)
 from vikunjbot.timeutils import utc_now
 from vikunjbot.vikunja import VikunjaAPIError, VikunjaClient
 
@@ -97,6 +103,11 @@ class EventWorker:
             # In that case it must not reach the former Telegram destination.
             logger.info("Ignoring event %s for inactive hook %s", event.id, event.hook_id)
             return
+        if event.event_name == "task.deleted" and event.task_id is not None:
+            # Deletion revokes Telegram-side actions, so do not discard it merely
+            # because the former action TTL elapsed while the worker was down.
+            await self._deliver_task_deletion(event, hook)
+            return
         expires_at = event.event_time + timedelta(seconds=hook.event_permission_ttl_seconds)
         if expires_at <= utc_now():
             logger.info("Ignoring expired event %s", event.id)
@@ -112,16 +123,22 @@ class EventWorker:
 
     async def _deliver_project_event(self, event: StoredEvent, hook: Hook) -> None:
         text = render_project_event(event.event_name, event.payload)
-        await self._bot.send_message(chat_id=hook.chat_id, text=text)
+        await self._bot.send_message(chat_id=hook.delivery_destination.chat_id, text=text)
 
     async def _deliver_task(
         self, event: StoredEvent, task: dict[str, Any], hook: Hook, expires_at: datetime
     ) -> None:
         current_snapshot = task_snapshot(task, hook.views)
         existing = await self._database.get_task_message(hook.id, event.task_id or 0)
+        if existing is not None and existing.deleted:
+            logger.info("Ignoring event %s for deleted task %s", event.id, event.task_id)
+            return
         text = render_task(task, hook.views)
         if existing is None:
-            sent = await self._bot.send_message(chat_id=hook.chat_id, text=text)
+            sent = await self._bot.send_message(
+                chat_id=hook.delivery_destination.chat_id,
+                text=text,
+            )
             message_id = sent.message_id
             previous_snapshot: dict[str, Any] = {}
         else:
@@ -130,7 +147,7 @@ class EventWorker:
             try:
                 await self._bot.edit_message_text(
                     text=text,
-                    chat_id=hook.chat_id,
+                    chat_id=hook.delivery_destination.chat_id,
                     message_id=message_id,
                 )
             except TelegramBadRequest as exc:
@@ -140,13 +157,12 @@ class EventWorker:
                     raise
         await self._database.save_task_message(
             hook_id=hook.id,
-            chat_id=hook.chat_id,
+            delivery_destination=hook.delivery_destination,
             task_id=event.task_id or 0,
             message_id=message_id,
             expires_at=expires_at,
             allowed_telegram_user_ids=hook.allowed_telegram_user_ids,
             snapshot=current_snapshot,
-            discussion_chat_id=hook.discussion_chat_id,
         )
         should_sync_done_reaction = (
             current_snapshot["done"]
@@ -155,23 +171,59 @@ class EventWorker:
         )
         if should_sync_done_reaction:
             await self._sync_done_reaction(
-                chat_id=hook.chat_id,
+                chat_id=hook.delivery_destination.chat_id,
                 message_id=message_id,
                 is_done=current_snapshot["done"],
             )
         if (
             existing is not None
-            and hook.discussion_chat_id is None
-            and await self._database.comment_updates_enabled(hook.chat_id)
+            and hook.delivery_destination.discussion_chat_id is None
+            and await self._database.comment_updates_enabled(hook.delivery_destination.chat_id)
         ):
             summary = change_summary(
                 event.event_name, previous_snapshot, current_snapshot, event.payload
             )
             await self._bot.send_message(
-                chat_id=hook.chat_id,
+                chat_id=hook.delivery_destination.chat_id,
                 text=summary,
                 reply_parameters=ReplyParameters(message_id=message_id),
             )
+
+    async def _deliver_task_deletion(self, event: StoredEvent, hook: Hook) -> None:
+        task_id = event.task_id
+        if task_id is None:  # pragma: no cover - guarded by _deliver
+            return
+        existing = await self._database.get_task_message(hook.id, task_id)
+        if existing is None:
+            task = _embedded_task(event.payload)
+            if task is not None:
+                # A deletion without a persistent message is informative but must
+                # never create a reply-to-act mapping for a non-existent task.
+                await self._bot.send_message(
+                    chat_id=hook.delivery_destination.chat_id,
+                    text=render_deleted_task(task),
+                )
+            return
+        if existing.deleted:
+            return
+        try:
+            await self._bot.edit_message_text(
+                text=render_deleted_task(existing.snapshot),
+                chat_id=hook.delivery_destination.chat_id,
+                message_id=existing.message_id,
+            )
+        except TelegramBadRequest as exc:
+            # If Telegram no longer permits the edit, retrying cannot restore a
+            # removed or too-old message. The mapping must still be revoked.
+            if not _deletion_edit_is_terminal(exc):
+                raise
+        if existing.snapshot.get("done"):
+            await self._sync_done_reaction(
+                chat_id=hook.delivery_destination.chat_id,
+                message_id=existing.message_id,
+                is_done=False,
+            )
+        await self._database.mark_task_message_deleted(hook.id, task_id)
 
     async def _sync_done_reaction(self, *, chat_id: int, message_id: int, is_done: bool) -> None:
         """Reflect completion without making task delivery depend on reactions."""
@@ -209,3 +261,22 @@ def _merge_event_bucket(
     if isinstance(event_buckets, (list, dict)) and event_buckets:
         merged["buckets"] = event_buckets
     return merged
+
+
+def _embedded_task(payload: dict[str, Any]) -> dict[str, Any] | None:
+    data = payload.get("data")
+    task = data.get("task") if isinstance(data, dict) else None
+    return task if isinstance(task, dict) else None
+
+
+def _deletion_edit_is_terminal(error: TelegramBadRequest) -> bool:
+    message = str(error).lower()
+    return any(
+        phrase in message
+        for phrase in (
+            "message is not modified",
+            "message to edit not found",
+            "message can't be edited",
+            "message_id_invalid",
+        )
+    )

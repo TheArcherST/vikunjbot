@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
-from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -14,7 +13,7 @@ from aiogram.filters import Command
 from aiogram.filters.command import CommandObject
 from aiogram.types import BotCommand, Message, MessageOriginChannel
 
-from vikunjbot.database import Database, HookView, TaskMessage
+from vikunjbot.database import Database, DeliveryDestination, HookView, TaskMessage
 from vikunjbot.event_worker import EventWorker
 from vikunjbot.settings import Settings, settings
 from vikunjbot.task_actions import apply_task_actions, parse_task_actions
@@ -51,12 +50,6 @@ class ChannelBindingError(ValueError):
 
 class HookConfigurationError(ValueError):
     """A requested webhook configuration is incomplete or unsafe."""
-
-
-@dataclass(frozen=True, slots=True)
-class ChannelDiscussion:
-    channel_id: int
-    discussion_chat_id: int
 
 
 def _is_private_chat(chat_type: ChatType | str) -> bool:
@@ -140,13 +133,13 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             client = await token_service.client_for_telegram_action(
                 TelegramInteraction(message.from_user.id)
             )
-            target = await _create_hook_target(
+            webhook_url = await _create_hook_target(
                 database=database,
                 config=config,
                 client=client,
                 project_id=project_id,
                 telegram_user_id=message.from_user.id,
-                chat_id=message.chat.id,
+                delivery_destination=DeliveryDestination(chat_id=message.chat.id),
                 view_ids=view_ids,
             )
         except (HookConfigurationError, TokenBindingError, TokenIdentityChangedError) as exc:
@@ -155,8 +148,8 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
         await message.answer(
             "Create a project webhook in Vikunja with this target URL and the task events "
             "you need:\n"
-            f"<code>{html.escape(target)}</code>\n\n"
-            "The URL contains only an opaque UUID. Its destination, actor permission, and "
+            f"<code>{html.escape(webhook_url)}</code>\n\n"
+            "The URL contains only an opaque UUID. Its delivery destination, actor permission, and "
             "selected views are stored in the bot database."
         )
 
@@ -202,16 +195,16 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             client = await token_service.client_for_telegram_action(
                 TelegramInteraction(message.from_user.id)
             )
-            target = await _create_hook_target(
+            webhook_url = await _create_hook_target(
                 database=database,
                 config=config,
                 client=client,
                 project_id=project_id,
                 telegram_user_id=message.from_user.id,
-                chat_id=message.chat.id,
+                delivery_destination=DeliveryDestination(chat_id=message.chat.id),
                 view_ids=view_ids,
             )
-            await client.create_project_webhook(project_id, target, _TASK_EVENTS)
+            await client.create_project_webhook(project_id, webhook_url, _TASK_EVENTS)
         except (HookConfigurationError, TokenBindingError, TokenIdentityChangedError) as exc:
             await message.answer(html.escape(str(exc)))
             return
@@ -232,7 +225,7 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
         arguments = _hook_arguments(command.args)
         if arguments is None or message.reply_to_message is None:
             await message.answer(
-                "Forward any post from the target channel here, then reply to it with "
+                "Forward any post from the delivery channel here, then reply to it with "
                 f"{_INSTALL_CHANNEL_WEBHOOK_COMMAND}."
             )
             return
@@ -244,17 +237,16 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             client = await token_service.client_for_telegram_action(
                 TelegramInteraction(message.from_user.id)
             )
-            target = await _create_hook_target(
+            webhook_url = await _create_hook_target(
                 database=database,
                 config=config,
                 client=client,
                 project_id=project_id,
                 telegram_user_id=message.from_user.id,
-                chat_id=destination.channel_id,
-                discussion_chat_id=destination.discussion_chat_id,
+                delivery_destination=destination,
                 view_ids=view_ids,
             )
-            await client.create_project_webhook(project_id, target, _TASK_EVENTS)
+            await client.create_project_webhook(project_id, webhook_url, _TASK_EVENTS)
         except (
             ChannelBindingError,
             HookConfigurationError,
@@ -338,11 +330,11 @@ async def _set_comment_updates(
 
 async def _channel_discussion_from_forward(
     bot: Bot, forwarded_message: Message, requesting_user_id: int
-) -> ChannelDiscussion:
+) -> DeliveryDestination:
     origin = forwarded_message.forward_origin
     if not isinstance(origin, MessageOriginChannel):
         raise ChannelBindingError(
-            "forward a post from the target channel, not a message from a group"
+            "forward a post from the delivery channel, not a message from a group"
         )
 
     try:
@@ -383,7 +375,7 @@ async def _channel_discussion_from_forward(
             "the bot cannot verify the channel and its discussion; check its memberships and rights"
         ) from exc
 
-    return ChannelDiscussion(channel_id=channel.id, discussion_chat_id=channel.linked_chat_id)
+    return DeliveryDestination(chat_id=channel.id, discussion_chat_id=channel.linked_chat_id)
 
 
 def _hook_arguments(value: str | None) -> tuple[int, tuple[int, ...]] | None:
@@ -409,9 +401,8 @@ async def _create_hook_target(
     client: VikunjaClient,
     project_id: int,
     telegram_user_id: int,
-    chat_id: int,
+    delivery_destination: DeliveryDestination,
     view_ids: tuple[int, ...],
-    discussion_chat_id: int | None = None,
 ) -> str:
     views = await _selected_kanban_views(client, project_id, view_ids)
     if views and not config.vikunjbot_service_token:
@@ -420,8 +411,7 @@ async def _create_hook_target(
         )
     hook = await database.create_hook(
         project_id=project_id,
-        chat_id=chat_id,
-        discussion_chat_id=discussion_chat_id,
+        delivery_destination=delivery_destination,
         allowed_telegram_user_ids=frozenset({telegram_user_id}),
         views=views,
     )
@@ -456,12 +446,15 @@ async def _task_message_for_reply(database: Database, message: Message) -> TaskM
     reply = message.reply_to_message
     if reply is None:  # pragma: no cover - enforced by the router filter
         return None
-    direct = await database.find_task_message(message.chat.id, reply.message_id)
+    direct = await database.find_task_message_in_delivery_destination(
+        message.chat.id,
+        reply.message_id,
+    )
     if direct is not None:
         return direct
     if not reply.is_automatic_forward or not isinstance(reply.forward_origin, MessageOriginChannel):
         return None
-    return await database.find_discussion_task_message(
+    return await database.find_task_message_from_delivery_discussion(
         message.chat.id,
         reply.forward_origin.chat.id,
         reply.forward_origin.message_id,

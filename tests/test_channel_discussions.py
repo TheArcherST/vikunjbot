@@ -12,7 +12,7 @@ from vikunjbot.bot import (
     _channel_discussion_from_forward,
     _task_message_for_reply,
 )
-from vikunjbot.database import Database
+from vikunjbot.database import Database, DeliveryDestination
 
 
 class ChannelBot:
@@ -49,7 +49,7 @@ async def test_channel_installation_requires_admin_and_uses_the_linked_discussio
         12,
     )
 
-    assert destination.channel_id == -100111
+    assert destination.chat_id == -100111
     assert destination.discussion_chat_id == -100222
 
 
@@ -67,20 +67,18 @@ async def test_discussion_reply_must_reference_an_automatic_forward_in_the_linke
 ) -> None:
     hook = await database.create_hook(
         project_id=1,
-        chat_id=-100111,
-        discussion_chat_id=-100222,
+        delivery_destination=DeliveryDestination(chat_id=-100111, discussion_chat_id=-100222),
         allowed_telegram_user_ids=frozenset({12}),
         views=(),
     )
     await database.save_task_message(
         hook_id=hook.id,
-        chat_id=-100111,
+        delivery_destination=DeliveryDestination(chat_id=-100111, discussion_chat_id=-100222),
         task_id=42,
         message_id=100,
         expires_at=datetime(2026, 8, 19, tzinfo=UTC),
         allowed_telegram_user_ids=frozenset({12}),
         snapshot={},
-        discussion_chat_id=-100222,
     )
     channel_origin = MessageOriginChannel(
         date=datetime(2026, 8, 18, tzinfo=UTC),

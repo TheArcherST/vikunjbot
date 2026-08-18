@@ -164,8 +164,9 @@ are created in Vikunja's Settings → API Tokens. The bot validates that directl
 submitted token once and stores only a Fernet-encrypted form in its dedicated
 PostgreSQL database.
 
-In the destination private chat or group, send `/webhook <project-id> [kanban-view-ids]`.
-It gives a target URL to paste into that Vikunja project's webhook. For example,
+In the private chat or group that will be the delivery destination, send
+`/webhook <project-id> [kanban-view-ids]`. It gives a webhook URL to paste into that
+Vikunja project. For example,
 `/webhook 12 4,9` tracks Kanban views 4 and 9. `/install_webhook <project-id>
 [kanban-view-ids]` creates the same project webhook via the connected user's API
 token. Use `/views <project-id>` to list the project's Kanban view IDs.
@@ -192,9 +193,10 @@ http://vikunjbot-event-relay:8080/events/8b3f07eb-2ec0-4c5c-9bc5-b50f41239705
 ```
 
 The UUID is only a lookup key. The database holds the hook configuration: project,
-destination chat, optional linked discussion, the Telegram users allowed to act, its
-event TTL, and the Kanban views selected for that destination. Unknown or inactive
-identifiers receive `404`; payloads are not accepted for a guessed route.
+delivery destination (a Telegram chat and optional linked discussion), the Telegram
+users allowed to act, its event TTL, and the Kanban views selected for that delivery
+destination. Unknown or inactive identifiers receive `404`; payloads are not accepted
+for a guessed route.
 
 The relay deliberately does not expose a public port and does not verify an HMAC, as
 requested. Keep it exclusively on an internal Docker network. The UUID is defense in
@@ -233,10 +235,13 @@ message. `/disable_comment_updates` reverses it. Channel routes deliberately omi
 these extra summaries: posting one separately would break Telegram's channel-to-
 discussion relationship; the original channel post is edited instead.
 
+When Vikunja deletes a task, its persistent Telegram message is changed to `🗑 Deleted`
+and becomes non-actionable. A delayed update cannot revive that mapping.
+
 When a task is completed, the bot also sets its own `✅` reaction on the persistent
 task message; it removes that reaction if the task is reopened. This is a visual
 indicator only — Vikunja remains the source of truth. The reaction must be allowed in
-the target chat or channel; an unavailable reaction is logged but never prevents task
+the delivery destination; an unavailable reaction is logged but never prevents task
 message delivery.
 
 Project update, deletion, and sharing events are also forwarded as standalone

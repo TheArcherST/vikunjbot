@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from vikunjbot.database import HookView
 from vikunjbot.event_worker import _merge_event_bucket, _needs_bucket_enrichment
-from vikunjbot.task_text import render_task, task_snapshot
+from vikunjbot.task_text import render_deleted_task, render_task, task_snapshot
 
 
 def test_zero_due_date_is_not_rendered_as_a_deadline() -> None:
@@ -106,3 +106,9 @@ def test_selected_kanban_views_render_their_own_current_bucket_names() -> None:
 
     assert "📥 Engineering: In progress" in rendered
     assert "📥 Release: Ready to publish" in rendered
+
+
+def test_deleted_task_is_rendered_as_a_terminal_notice() -> None:
+    assert render_deleted_task({"identifier": "DEMO-42", "title": "Gone"}) == (
+        "<b>DEMO-42: Gone</b>\n🗑 Deleted"
+    )

@@ -23,9 +23,7 @@ def task_snapshot(task: dict[str, Any], views: tuple[HookView, ...] = ()) -> dic
 
 def render_task(task: dict[str, Any], views: tuple[HookView, ...] = ()) -> str:
     snapshot = task_snapshot(task, views)
-    title = html.escape(snapshot["title"] or "Untitled task")
-    identifier = html.escape(snapshot["identifier"])
-    heading = f"<b>{identifier}: {title}</b>" if identifier else f"<b>{title}</b>"
+    heading = _task_heading(snapshot)
     lines = [heading, "✅ Completed" if snapshot["done"] else "⬜ Open"]
     if views:
         for view_title, bucket_title in snapshot["view_buckets"]:
@@ -39,6 +37,12 @@ def render_task(task: dict[str, Any], views: tuple[HookView, ...] = ()) -> str:
     if snapshot["assignees"]:
         lines.append("👤 " + ", ".join(html.escape(item) for item in snapshot["assignees"]))
     return "\n".join(lines)
+
+
+def render_deleted_task(task: dict[str, Any]) -> str:
+    """Render a terminal, non-actionable task-deletion notice."""
+
+    return f"{_task_heading(task_snapshot(task))}\n🗑 Deleted"
 
 
 def render_project_event(event_name: str, payload: dict[str, Any]) -> str:
@@ -149,6 +153,12 @@ def _names(value: object, *, title_key: str) -> list[str]:
 
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _task_heading(snapshot: dict[str, Any]) -> str:
+    title = html.escape(snapshot["title"] or "Untitled task")
+    identifier = html.escape(snapshot["identifier"])
+    return f"<b>{identifier}: {title}</b>" if identifier else f"<b>{title}</b>"
 
 
 def _due_date(value: object) -> str:

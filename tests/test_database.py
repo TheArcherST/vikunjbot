@@ -3,14 +3,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
-from vikunjbot.database import Database, HookView
+from vikunjbot.database import Database, DeliveryDestination, HookView
 
 
 async def test_hook_configuration_persists_its_selected_kanban_views(database: Database) -> None:
     hook = await database.create_hook(
         project_id=17,
-        chat_id=-100123,
-        discussion_chat_id=-100456,
+        delivery_destination=DeliveryDestination(chat_id=-100123, discussion_chat_id=-100456),
         allowed_telegram_user_ids=frozenset({5, 9}),
         views=(HookView(3, "Development"), HookView(8, "Release")),
     )
@@ -23,7 +22,7 @@ async def test_hook_configuration_persists_its_selected_kanban_views(database: D
 async def test_event_queue_deduplicates_raw_payloads_and_claims_once(database: Database) -> None:
     hook = await database.create_hook(
         project_id=1,
-        chat_id=12,
+        delivery_destination=DeliveryDestination(chat_id=12),
         allowed_telegram_user_ids=frozenset({12}),
         views=(),
     )
@@ -51,13 +50,13 @@ async def test_event_queue_deduplicates_raw_payloads_and_claims_once(database: D
 async def test_task_message_mapping_is_scoped_to_each_hook(database: Database) -> None:
     first = await database.create_hook(
         project_id=1,
-        chat_id=12,
+        delivery_destination=DeliveryDestination(chat_id=12),
         allowed_telegram_user_ids=frozenset({12}),
         views=(),
     )
     second = await database.create_hook(
         project_id=1,
-        chat_id=24,
+        delivery_destination=DeliveryDestination(chat_id=24),
         allowed_telegram_user_ids=frozenset({24}),
         views=(),
     )
@@ -65,7 +64,7 @@ async def test_task_message_mapping_is_scoped_to_each_hook(database: Database) -
 
     await database.save_task_message(
         hook_id=first.id,
-        chat_id=12,
+        delivery_destination=DeliveryDestination(chat_id=12),
         task_id=42,
         message_id=100,
         expires_at=expires_at,
@@ -74,7 +73,7 @@ async def test_task_message_mapping_is_scoped_to_each_hook(database: Database) -
     )
     await database.save_task_message(
         hook_id=first.id,
-        chat_id=12,
+        delivery_destination=DeliveryDestination(chat_id=12),
         task_id=42,
         message_id=101,
         expires_at=expires_at + timedelta(hours=1),
@@ -83,7 +82,7 @@ async def test_task_message_mapping_is_scoped_to_each_hook(database: Database) -
     )
     await database.save_task_message(
         hook_id=second.id,
-        chat_id=24,
+        delivery_destination=DeliveryDestination(chat_id=24),
         task_id=42,
         message_id=200,
         expires_at=expires_at,

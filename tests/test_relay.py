@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import httpx
 
-from vikunjbot.database import Database
+from vikunjbot.database import Database, DeliveryDestination
 from vikunjbot.relay import create_app
 from vikunjbot.settings import Settings
 
@@ -16,7 +16,10 @@ async def test_relay_commits_event_before_acknowledging(
     config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
     hook = await database.create_hook(
-        project_id=1, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
     )
     payload = event_payload()
     raw_body = json.dumps(payload).encode()

@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import SendMessage
 from aiogram.types import ReactionTypeEmoji
 
-from vikunjbot.database import Database
+from vikunjbot.database import Database, DeliveryDestination
 from vikunjbot.event_worker import EventWorker
 from vikunjbot.settings import Settings
 
@@ -52,7 +52,10 @@ async def test_task_updates_edit_the_original_telegram_message(
     config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
     hook = await database.create_hook(
-        project_id=1, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
     )
     first = event_payload()
     second = event_payload(event_name="task.updated", title="Write more tests")
@@ -75,7 +78,10 @@ async def test_done_state_is_reflected_by_the_bot_reaction(
     config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
     hook = await database.create_hook(
-        project_id=1, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
     )
     completed = event_payload()
     completed["data"]["task"]["done"] = True
@@ -95,7 +101,10 @@ async def test_reaction_rejection_does_not_retry_task_delivery(
     config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
     hook = await database.create_hook(
-        project_id=1, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
     )
     completed = event_payload()
     completed["data"]["task"]["done"] = True
@@ -112,7 +121,10 @@ async def test_project_events_are_forwarded_without_a_task_mapping(
     config: Settings, database: Database
 ) -> None:
     hook = await database.create_hook(
-        project_id=5, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+        project_id=5,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
     )
     payload = {
         "event_name": "project.updated",
@@ -132,8 +144,7 @@ async def test_channel_route_publishes_in_the_channel_and_records_its_discussion
 ) -> None:
     hook = await database.create_hook(
         project_id=1,
-        chat_id=-100111,
-        discussion_chat_id=-100222,
+        delivery_destination=DeliveryDestination(chat_id=-100111, discussion_chat_id=-100222),
         allowed_telegram_user_ids=frozenset({12}),
         views=(),
     )
@@ -146,14 +157,17 @@ async def test_channel_route_publishes_in_the_channel_and_records_its_discussion
     assert bot.sent[0][0] == -100111
     task_message = await database.get_task_message(hook.id, 42)
     assert task_message is not None
-    assert task_message.discussion_chat_id == -100222
+    assert task_message.delivery_destination.discussion_chat_id == -100222
 
 
 async def test_bucket_move_edits_the_persistent_task_message(
     config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
     hook = await database.create_hook(
-        project_id=1, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
     )
     created = event_payload()
     moved = event_payload(event_name="task.updated")
@@ -169,3 +183,53 @@ async def test_bucket_move_edits_the_persistent_task_message(
     assert bot.edited == [
         (12, 101, "<b>DEMO-42: Write tests</b>\n⬜ Open\n📥 Bucket: Ready for review")
     ]
+
+
+async def test_task_deletion_revokes_replies_and_cannot_be_undone_by_a_late_update(
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    hook = await database.create_hook(
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
+    )
+    created = event_payload()
+    created["data"]["task"]["done"] = True
+    deleted = event_payload(event_name="task.deleted")
+    stale_update = event_payload(event_name="task.updated", title="Should not reappear")
+    await database.enqueue_event(hook.id, json.dumps(created).encode(), created)
+    await database.enqueue_event(hook.id, json.dumps(deleted).encode(), deleted)
+    await database.enqueue_event(hook.id, json.dumps(stale_update).encode(), stale_update)
+    bot = FakeBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+
+    assert await worker.process_one() is True
+    assert await worker.process_one() is True
+    assert await worker.process_one() is True
+
+    assert bot.edited == [(12, 101, "<b>DEMO-42: Write tests</b>\n🗑 Deleted")]
+    assert bot.reactions == [(12, 101, ["✅"]), (12, 101, [])]
+    task_message = await database.get_task_message(hook.id, 42)
+    assert task_message is not None
+    assert task_message.deleted is True
+    assert await database.find_task_message_in_delivery_destination(12, 101) is None
+
+
+async def test_untracked_task_deletion_is_a_notification_not_an_actionable_message(
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    hook = await database.create_hook(
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
+    )
+    deleted = event_payload(event_name="task.deleted")
+    await database.enqueue_event(hook.id, json.dumps(deleted).encode(), deleted)
+    bot = FakeBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+
+    assert await worker.process_one() is True
+    assert bot.sent == [(12, "<b>DEMO-42: Write tests</b>\n🗑 Deleted")]
+    assert await database.find_task_message_in_delivery_destination(12, 101) is None
