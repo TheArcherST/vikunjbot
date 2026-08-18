@@ -171,9 +171,12 @@ def _needs_bucket_enrichment(task: dict[str, Any]) -> bool:
 def _merge_event_bucket(
     event_task: dict[str, Any], enriched_task: dict[str, Any]
 ) -> dict[str, Any]:
-    """Keep Kanban-view context which Vikunja omits from a standalone task read."""
+    """Keep the bucket context captured by the webhook event itself."""
     merged = dict(enriched_task)
     event_bucket_id = event_task.get("bucket_id")
     if isinstance(event_bucket_id, int) and event_bucket_id > 0:
         merged["bucket_id"] = event_bucket_id
+    event_buckets = event_task.get("buckets")
+    if isinstance(event_buckets, (list, dict)) and event_buckets:
+        merged["buckets"] = event_buckets
     return merged

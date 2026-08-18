@@ -204,9 +204,11 @@ It is only used to read a task (including its buckets) when event data is incomp
 it never performs a user-requested write. Without this access, an unknown bucket is
 omitted rather than displayed as a potentially misleading numeric ID.
 
-The webhook event's `bucket_id` is retained while enriching: Vikunja can omit that
-view-specific field on a standalone task read even when `expand=buckets` returns the
-available bucket titles.
+The webhook's bucket context takes priority over a later task read: Vikunja can omit
+the view-specific `bucket_id` there even when `expand=buckets` returns bucket titles.
+When an event supplies exactly one bucket but no ID, that bucket is used directly. If
+several buckets are present without an ID, the bot omits the field rather than guess a
+column from another view.
 
 ## Reliability model
 

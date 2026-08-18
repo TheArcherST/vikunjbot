@@ -95,15 +95,23 @@ def _bucket_name(task: dict[str, Any]) -> str:
             value = _text(bucket.get(key))
             if value:
                 return value
-    buckets = task.get("buckets")
-    if isinstance(buckets, dict):
-        buckets = list(buckets.values())
-    if isinstance(buckets, list):
-        bucket_id = task.get("bucket_id")
+    buckets = _buckets(task.get("buckets"))
+    bucket_id = task.get("bucket_id")
+    if isinstance(bucket_id, int) and bucket_id > 0:
         for candidate in buckets:
-            if isinstance(candidate, dict) and candidate.get("id") == bucket_id:
+            if candidate.get("id") == bucket_id:
                 return _text(candidate.get("title") or candidate.get("name"))
+    if len(buckets) == 1:
+        return _text(buckets[0].get("title") or buckets[0].get("name"))
     return ""
+
+
+def _buckets(value: object) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        value = list(value.values())
+    if not isinstance(value, list):
+        return []
+    return [candidate for candidate in value if isinstance(candidate, dict)]
 
 
 def _names(value: object, *, title_key: str) -> list[str]:

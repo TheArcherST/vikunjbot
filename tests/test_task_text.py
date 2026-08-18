@@ -37,6 +37,17 @@ def test_bucket_title_from_expanded_bucket_map_is_forwarded() -> None:
     assert _needs_bucket_enrichment(task) is False
 
 
+def test_single_bucket_from_a_webhook_event_is_forwarded_without_a_bucket_id() -> None:
+    task = {
+        "title": "Move me",
+        "bucket_id": 0,
+        "buckets": [{"id": 8, "title": "Ready for review", "project_view_id": 12}],
+    }
+
+    assert task_snapshot(task)["bucket"] == "Ready for review"
+    assert _needs_bucket_enrichment(task) is False
+
+
 def test_incomplete_bucket_requests_service_account_enrichment() -> None:
     assert _needs_bucket_enrichment({"bucket_id": 8, "bucket": {"id": 8}}) is True
 
@@ -54,6 +65,24 @@ def test_enrichment_keeps_the_kanban_bucket_from_the_webhook_event() -> None:
     )
 
     assert task_snapshot(enriched)["bucket"] == "Ready for review"
+
+
+def test_enrichment_keeps_the_event_bucket_when_the_task_has_already_moved() -> None:
+    enriched = _merge_event_bucket(
+        {"bucket_id": 0, "buckets": [{"id": 10, "title": "Review"}]},
+        {"bucket_id": 0, "buckets": [{"id": 12, "title": "Iter 2, done"}]},
+    )
+
+    assert task_snapshot(enriched)["bucket"] == "Review"
+
+
+def test_ambiguous_buckets_without_a_bucket_id_are_not_guessed() -> None:
+    task = {
+        "bucket_id": 0,
+        "buckets": [{"id": 10, "title": "Review"}, {"id": 12, "title": "Done"}],
+    }
+
+    assert task_snapshot(task)["bucket"] == ""
 
 
 def test_unknown_bucket_is_not_presented_as_an_id() -> None:
