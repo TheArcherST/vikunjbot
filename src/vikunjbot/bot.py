@@ -30,6 +30,15 @@ from vikunjbot.vikunja import VikunjaAPIError
 logger = logging.getLogger(__name__)
 
 
+def _command_syntax(value: str) -> str:
+    """Render command syntax safely when the bot's default parse mode is HTML."""
+    return f"<code>{html.escape(value)}</code>"
+
+
+_LOGIN_COMMAND = _command_syntax("/login <API token>")
+_INSTALL_WEBHOOK_COMMAND = _command_syntax("/install_webhook <project-id> [expiry]")
+
+
 def create_telegram_bot(config: Settings) -> Bot:
     """Create the bot session, optionally routing all Bot API calls through a proxy."""
     session = AiohttpSession(proxy=config.telegram_proxy_url)
@@ -52,11 +61,11 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
     async def start(message: Message) -> None:
         await message.answer(
             "Vikunja events can be delivered here or to a group/channel.\n\n"
-            "Use /login <API token> in a private chat, then reply to a task message: "
+            f"Use {_LOGIN_COMMAND} in a private chat, then reply to a task message: "
             "*label toggles a label, @username toggles an assignee, and "
             "remaining text becomes a comment.\n\n"
             "Use /webhook [expiry] to get a webhook URL, or "
-            "/install_webhook <project-id> [expiry] "
+            f"{_INSTALL_WEBHOOK_COMMAND} "
             "to create it through your bound account."
         )
 
@@ -66,7 +75,7 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             await message.answer("For your security, send /login only in a private chat.")
             return
         if message.from_user is None or not command.args:
-            await message.answer("Usage: /login <Vikunja API token>")
+            await message.answer(f"Usage: {_LOGIN_COMMAND}")
             return
         try:
             username = await token_service.bind_direct_token(
@@ -113,7 +122,7 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             return
         arguments = (command.args or "").split()
         if not arguments or not arguments[0].isdigit():
-            await message.answer("Usage: /install_webhook <project-id> [expiry]")
+            await message.answer(f"Usage: {_INSTALL_WEBHOOK_COMMAND}")
             return
         expiry = arguments[1] if len(arguments) > 1 else "1d"
         try:
