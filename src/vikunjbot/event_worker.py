@@ -38,7 +38,8 @@ class EventEnricher:
                 and event.task_id is not None
             ):
                 try:
-                    return await self._client.get_task(event.task_id, expand_buckets=True)
+                    enriched = await self._client.get_task(event.task_id, expand_buckets=True)
+                    return _merge_event_bucket(embedded, enriched)
                 except VikunjaAPIError:
                     logger.warning(
                         "Could not enrich task %s with the service account", event.task_id
@@ -165,3 +166,14 @@ class EventWorker:
 
 def _needs_bucket_enrichment(task: dict[str, Any]) -> bool:
     return isinstance(task.get("bucket_id"), int) and not task_snapshot(task)["bucket"]
+
+
+def _merge_event_bucket(
+    event_task: dict[str, Any], enriched_task: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep Kanban-view context which Vikunja omits from a standalone task read."""
+    merged = dict(enriched_task)
+    event_bucket_id = event_task.get("bucket_id")
+    if isinstance(event_bucket_id, int) and event_bucket_id > 0:
+        merged["bucket_id"] = event_bucket_id
+    return merged

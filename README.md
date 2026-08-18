@@ -204,6 +204,10 @@ It is only used to read a task (including its buckets) when event data is incomp
 it never performs a user-requested write. Without this access, an unknown bucket is
 omitted rather than displayed as a potentially misleading numeric ID.
 
+The webhook event's `bucket_id` is retained while enriching: Vikunja can omit that
+view-specific field on a standalone task read even when `expand=buckets` returns the
+available bucket titles.
+
 ## Reliability model
 
 SQLite runs in WAL mode with `synchronous=FULL`; a relay request is acknowledged only

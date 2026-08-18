@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vikunjbot.event_worker import _needs_bucket_enrichment
+from vikunjbot.event_worker import _merge_event_bucket, _needs_bucket_enrichment
 from vikunjbot.task_text import render_task, task_snapshot
 
 
@@ -39,6 +39,21 @@ def test_bucket_title_from_expanded_bucket_map_is_forwarded() -> None:
 
 def test_incomplete_bucket_requests_service_account_enrichment() -> None:
     assert _needs_bucket_enrichment({"bucket_id": 8, "bucket": {"id": 8}}) is True
+
+
+def test_enrichment_keeps_the_kanban_bucket_from_the_webhook_event() -> None:
+    enriched = _merge_event_bucket(
+        {"bucket_id": 8},
+        {
+            "bucket_id": 0,
+            "buckets": [
+                {"id": 7, "title": "Backlog"},
+                {"id": 8, "title": "Ready for review"},
+            ],
+        },
+    )
+
+    assert task_snapshot(enriched)["bucket"] == "Ready for review"
 
 
 def test_unknown_bucket_is_not_presented_as_an_id() -> None:
