@@ -1,4 +1,4 @@
-FROM python:3.14-slim AS runtime
+FROM python:3.14-slim AS dependencies
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,14 +15,19 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
+COPY migrations ./migrations
+COPY alembic.ini ./
 RUN uv sync --frozen --no-dev
 
-COPY docker-entrypoint.py ./
+FROM dependencies AS test
 
-RUN useradd --system --uid 10001 --create-home appuser \
-    && mkdir /data \
-    && chown appuser:appuser /data
+RUN uv sync --frozen --all-groups
+COPY tests ./tests
+
+FROM dependencies AS runtime
+
+RUN useradd --system --uid 10001 --create-home appuser
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-ENTRYPOINT ["python", "/app/docker-entrypoint.py"]
+USER appuser

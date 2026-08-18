@@ -31,9 +31,9 @@ def _factory(calls: list[str], identity: dict[str, object]):
     return create
 
 
-async def test_telegram_interaction_checks_a_bound_token_once(config: Settings) -> None:
-    database = Database(config.app_db_path)
-    database.initialize()
+async def test_telegram_interaction_checks_a_bound_token_once(
+    config: Settings, database: Database
+) -> None:
     calls: list[str] = []
     service = TokenService(
         database,
@@ -48,14 +48,14 @@ async def test_telegram_interaction_checks_a_bound_token_once(config: Settings) 
     await service.client_for_telegram_action(interaction)
 
     assert calls == ["whoami", "whoami"]
-    binding = database.get_token_binding(123)
+    binding = await database.get_token_binding(123)
     assert binding is not None
     assert b"secret-token" not in binding.encrypted_token
 
 
-async def test_bound_token_cannot_silently_switch_vikunja_accounts(config: Settings) -> None:
-    database = Database(config.app_db_path)
-    database.initialize()
+async def test_bound_token_cannot_silently_switch_vikunja_accounts(
+    config: Settings, database: Database
+) -> None:
     calls: list[str] = []
     good_factory = _factory(calls, {"id": 9, "username": "lena"})
     service = TokenService(

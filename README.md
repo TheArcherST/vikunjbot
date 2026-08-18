@@ -1,12 +1,13 @@
 # vikunjbot
 
 `vikunjbot` connects Vikunja project webhooks with Telegram. It consists of two
-processes sharing one durable SQLite database:
+application processes sharing a dedicated PostgreSQL database:
 
 - `vikunjbot-event-relay` accepts Vikunja webhooks on the private Docker network and
-  commits them to SQLite before returning `202 Accepted`.
+  commits them to PostgreSQL before returning `202 Accepted`.
 - `vikunjbot` polls that queue, sends or updates the corresponding Telegram task
   message, and accepts replies as Vikunja comments, label changes, or assignments.
+- `vikunjbot-migrate` applies Alembic migrations before the relay and bot start.
 
 ## Include it in a Vikunja Compose stack
 
@@ -22,18 +23,60 @@ services:
       # Required for internal webhook target URLs.
       VIKUNJA_OUTGOINGREQUESTS_ALLOWNONROUTABLEIPS: "true"
 
+  vikunjbot-postgres:
+    image: postgres:18.4-trixie@sha256:8ff36f3c66371cba71d20ceedccfc3de9669a68737607888c4ef0af93abe8e39
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - path: ./vikunjbot/.env
+        required: false
+    environment:
+      POSTGRES_DB: vikunjbot
+      POSTGRES_USER: vikunjbot
+    volumes:
+      - ./vikunjbot-data/postgres:/var/lib/postgresql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  vikunjbot-migrate:
+    build: ./vikunjbot
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - path: ./vikunjbot/.env
+        required: false
+    command: ["vikunjbot-migrate"]
+    networks:
+      - backend
+    depends_on:
+      vikunjbot-postgres:
+        condition: service_healthy
+
   vikunjbot-event-relay:
     build: ./vikunjbot
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    env_file:
+      - path: ./vikunjbot/.env
+        required: false
     environment:
-      APP_DB_PATH: /data/vikunjbot.sqlite3
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: 8080
     command: ["vikunjbot-relay"]
-    volumes:
-      - ./vikunjbot-data:/data
     networks:
       - backend
+    depends_on:
+      vikunjbot-migrate:
+        condition: service_completed_successfully
 
   vikunjbot:
     build: ./vikunjbot
@@ -43,25 +86,23 @@ services:
     env_file:
       - path: ./vikunjbot/.env
         required: false
-    environment:
-      APP_DB_PATH: /data/vikunjbot.sqlite3
     command: ["vikunjbot"]
-    volumes:
-      - ./vikunjbot-data:/data
     networks:
       - backend
     depends_on:
       vikunjbot-event-relay:
         condition: service_started
+      vikunjbot-migrate:
+        condition: service_completed_successfully
       vikunja:
         condition: service_started
 ```
 
-The example uses `./vikunjbot-data` as a bind mount, so both the SQLite state and
-encrypted token bindings are visible beside the instance compose file. Add this path
-to the host repository's `.gitignore`, restrict its host permissions, and include it
-in backups. The images briefly drop from root to an unprivileged user after making a
-new bind mount writable.
+The example uses `./vikunjbot-data/postgres` as a bind mount, so all bot state — the
+durable queue, encrypted token bindings, hook configuration, and task-message mapping
+— is stored beside the instance compose file. Add `./vikunjbot-data` to the host
+repository's `.gitignore`, restrict its host permissions, and include it in backups.
+This is a separate PostgreSQL database from Vikunja's own database.
 
 The relay deliberately does **not** verify an HMAC, as requested. Do not attach
 `vikunjbot-event-relay` to a public network, publish its port, or add a Traefik route.
@@ -70,12 +111,14 @@ The relay deliberately does **not** verify an HMAC, as requested. Do not attach
 > multi-user instance, prefer a Mole proxy with an ACL limited to the relay.
 
 Create `./vikunjbot/.env` from `./vikunjbot/.env.example` and fill in the required
-values. The root `compose.yaml` loads this file only for the bot service, so these
-settings do not need to be in the root Compose project's `.env`:
+values. The root `compose.yaml` loads this file only for the bot's PostgreSQL,
+migration, relay, and bot services, so these settings do not need to be in the root
+Compose project's `.env`:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=...
 TOKEN_ENCRYPTION_KEY=...
+POSTGRES_PASSWORD=...
 # Optional: http://proxy.example:8080 or socks5://user:password@proxy.example:1080
 TELEGRAM_PROXY_URL=
 ```
@@ -118,19 +161,21 @@ docker compose up -d --build
 
 Then, in a private chat with the bot, send `/login <Vikunja API token>`. API tokens
 are created in Vikunja's Settings → API Tokens. The bot validates that directly
-submitted token once and stores only a Fernet-encrypted form in
-`./vikunjbot-data/` beside the host compose file.
+submitted token once and stores only a Fernet-encrypted form in its dedicated
+PostgreSQL database.
 
-In the destination private chat or group, send `/webhook 1d`. It gives a target URL
-to paste into the desired Vikunja project webhook. `/install_webhook <project-id> 1d`
-creates the same project webhook via the connected user's API token.
+In the destination private chat or group, send `/webhook <project-id> [kanban-view-ids]`.
+It gives a target URL to paste into that Vikunja project's webhook. For example,
+`/webhook 12 4,9` tracks Kanban views 4 and 9. `/install_webhook <project-id>
+[kanban-view-ids]` creates the same project webhook via the connected user's API
+token. Use `/views <project-id>` to list the project's Kanban view IDs.
 
 For a regular group, add the bot as an administrator so it can post and edit task
 messages. For a **channel with a linked discussion**, add the bot as a channel
 administrator with permission to post, and as an administrator in the linked discussion
 group too.
 Then, in a private chat with the bot, forward any post from that channel and reply to
-it with `/install_channel_webhook <project-id> [expiry]`.
+it with `/install_channel_webhook <project-id> [kanban-view-ids]`.
 
 The bot verifies that the requester is a channel administrator, that the channel
 actually has a linked discussion, and that the bot can post in both required places.
@@ -138,32 +183,28 @@ It then publishes task messages in the channel itself. Telegram's automatic forw
 creates the corresponding thread in the linked discussion, and replies in that thread
 are treated as replies to the channel task message — not as a separate group route.
 
-## Stream tags and access boundary
+## Hook identifiers and access boundary
 
-The final component of a webhook URL is a route tag. The bot emits this form:
+The final component of a webhook URL is an opaque, canonical UUID, for example:
 
 ```text
-http://vikunjbot-event-relay:8080/events/telegram-id:123456,telegram-chat-id:-100987654321,expiry:1d
+http://vikunjbot-event-relay:8080/events/8b3f07eb-2ec0-4c5c-9bc5-b50f41239705
 ```
 
-- `telegram-id` identifies the Telegram account allowed to act on that event.
-  Without a `telegram-chat-id`, it is also the private-message recipient.
-- `telegram-chat-id` targets a regular group. If present, it prevents an additional
-  private copy from being sent.
-- `telegram-channel-id` together with `telegram-discussion-chat-id` targets a channel
-  and its one linked discussion. These directives are produced by
-  `/install_channel_webhook` after the Telegram-side checks above.
-- `expiry` is mandatory and supports positive `s`, `m`, `h`, `d`, and `w` values.
-  Its deadline is calculated from Vikunja's event timestamp, not delivery time.
+The UUID is only a lookup key. The database holds the hook configuration: project,
+destination chat, optional linked discussion, the Telegram users allowed to act, its
+event TTL, and the Kanban views selected for that destination. Unknown or inactive
+identifiers receive `404`; payloads are not accepted for a guessed route.
 
-A `telegram-chat-id` without a `telegram-id` is intentionally read-only. This keeps a
-copy-only channel from accidentally granting its members control over a task.
+The relay deliberately does not expose a public port and does not verify an HMAC, as
+requested. Keep it exclusively on an internal Docker network. The UUID is defense in
+depth, not a replacement for network isolation.
 
 For a channel route, the database records both the channel post and its verified linked
 discussion ID. A reply can trigger a Vikunja action only when it is under Telegram's
 automatic forward of that stored channel post in that exact discussion, and only from
-the `telegram-id` that installed the route. A manually forwarded post in another group
-does not pass this check.
+the Telegram account granted access for that hook. A manually forwarded post in another
+group does not pass this check.
 
 Only a reply to the persistent message of a routed task can initiate a Vikunja action.
 Before any such Telegram-originated action, the bot calls `GET /user` exactly once
@@ -203,30 +244,31 @@ notifications. They do not represent a task and therefore have no reply-to-act m
 
 ## Optional `vikunjbot` service account
 
-Some event payloads contain only a Kanban `bucket_id`, or a bucket object without its
-title. Create a dedicated Vikunja account named `vikunjbot`, grant it read access to
-resources you want enriched, issue an API token, and set `VIKUNJBOT_SERVICE_TOKEN`.
-It is only used to read a task (including its buckets) when event data is incomplete;
-it never performs a user-requested write. Without this access, an unknown bucket is
-omitted rather than displayed as a potentially misleading numeric ID.
+Kanban bucket names belong to a specific view. When a hook selects Kanban views, the
+bot obtains the task's current `expand=buckets` state from Vikunja and renders a
+separate bucket line for every selected view. This avoids borrowing the bucket title
+from whichever view happened to send the webhook. Create a dedicated Vikunja account
+named `vikunjbot`, grant it read access to the relevant projects, issue an API token,
+and set `VIKUNJBOT_SERVICE_TOKEN`. It is used only for that read-only enrichment and
+never for a user-requested write.
 
-The webhook's bucket context takes priority over a later task read: Vikunja can omit
-the view-specific `bucket_id` there even when `expand=buckets` returns bucket titles.
-When an event supplies exactly one bucket but no ID, that bucket is used directly. If
-several buckets are present without an ID, the bot omits the field rather than guess a
-column from another view.
+Without selected views, the bot retains the webhook's single generic bucket when it
+can identify it unambiguously. Without a service token, configuring selected views is
+rejected, rather than silently showing stale or ambiguous columns.
 
 ## Reliability model
 
-SQLite runs in WAL mode with `synchronous=FULL`; a relay request is acknowledged only
-after its event row is committed. Identical raw payloads to the same route are safely
-deduplicated. The worker uses a persisted lease and an unbounded, capped exponential
-backoff, so a restart or Telegram/Vikunja outage does not lose accepted events.
+PostgreSQL is the source of truth for hooks, encrypted token bindings, accepted events,
+and Telegram-message mappings. A relay request is acknowledged only after its event
+row is committed. Identical raw payloads to the same hook are safely deduplicated.
+Workers claim queue rows using PostgreSQL row locks with `SKIP LOCKED`, retain a
+persisted lease, and use an unbounded, capped exponential backoff, so a restart or
+Telegram/Vikunja outage does not lose accepted events.
 
 Delivery to Telegram is inherently at-least-once: no Telegram send API offers an
 idempotency key, so a process crash after Telegram accepted a new message but before
-SQLite recorded its `message_id` can cause one duplicate. Subsequent updates converge
-on the saved message mapping.
+PostgreSQL recorded its `message_id` can cause one duplicate. Subsequent updates
+converge on the saved message mapping.
 
 ## Development
 
@@ -234,7 +276,11 @@ on the saved message mapping.
 uv sync --all-groups
 uv run ruff check .
 uv run ruff format --check .
-uv run pytest
+make test
 ```
 
-The test suite runs without Telegram or a Vikunja instance.
+`make test` builds the `test` Docker target and launches a disposable PostgreSQL test
+database. The test setup refuses protected database names and recreates the test schema
+before every test; setting `VIKUNJBOT_TEST_DROP_DATABASE=1` (the Compose default) also
+drops the entire test database afterwards. The suite runs without Telegram or a
+Vikunja instance.

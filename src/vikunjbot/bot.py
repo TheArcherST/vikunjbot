@@ -14,9 +14,8 @@ from aiogram.filters import Command
 from aiogram.filters.command import CommandObject
 from aiogram.types import BotCommand, Message, MessageOriginChannel
 
-from vikunjbot.database import Database, TaskMessage
+from vikunjbot.database import Database, HookView, TaskMessage
 from vikunjbot.event_worker import EventWorker
-from vikunjbot.routing import InvalidRouteTag, make_route_tag
 from vikunjbot.settings import Settings, settings
 from vikunjbot.task_actions import apply_task_actions, parse_task_actions
 from vikunjbot.timeutils import utc_now
@@ -27,7 +26,7 @@ from vikunjbot.tokens import (
     TokenIdentityChangedError,
     TokenService,
 )
-from vikunjbot.vikunja import VikunjaAPIError
+from vikunjbot.vikunja import VikunjaAPIError, VikunjaClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +37,20 @@ def _command_syntax(value: str) -> str:
 
 
 _LOGIN_COMMAND = _command_syntax("/login <API token>")
-_INSTALL_WEBHOOK_COMMAND = _command_syntax("/install_webhook <project-id> [expiry]")
-_INSTALL_CHANNEL_WEBHOOK_COMMAND = _command_syntax("/install_channel_webhook <project-id> [expiry]")
+_WEBHOOK_COMMAND = _command_syntax("/webhook <project-id> [kanban-view-ids]")
+_INSTALL_WEBHOOK_COMMAND = _command_syntax("/install_webhook <project-id> [kanban-view-ids]")
+_INSTALL_CHANNEL_WEBHOOK_COMMAND = _command_syntax(
+    "/install_channel_webhook <project-id> [kanban-view-ids]"
+)
+_VIEWS_COMMAND = _command_syntax("/views <project-id>")
 
 
 class ChannelBindingError(ValueError):
     """A channel cannot be safely connected to a webhook route."""
+
+
+class HookConfigurationError(ValueError):
+    """A requested webhook configuration is incomplete or unsafe."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,8 +93,8 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             f"Use {_LOGIN_COMMAND} in a private chat, then reply to a task message: "
             "*label toggles a label, @username toggles an assignee, and "
             "remaining text becomes a comment.\n\n"
-            "Use /webhook [expiry] to get a webhook URL, or "
-            f"{_INSTALL_WEBHOOK_COMMAND} "
+            f"Use {_VIEWS_COMMAND} to list a project's Kanban views. Then use "
+            f"{_WEBHOOK_COMMAND} to get a webhook URL, or {_INSTALL_WEBHOOK_COMMAND} "
             "to create it through your bound account. To publish into a channel and its linked "
             "discussion, forward a channel post here and reply with\n"
             f"{_INSTALL_CHANNEL_WEBHOOK_COMMAND}."
@@ -115,7 +122,7 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
         if not _is_private_chat(message.chat.type) or message.from_user is None:
             await message.answer("Use /logout in a private chat.")
             return
-        removed = token_service.unbind(message.from_user.id)
+        removed = await token_service.unbind(message.from_user.id)
         await message.answer(
             "Vikunja token removed." if removed else "No Vikunja token was connected."
         )
@@ -124,41 +131,91 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
     async def webhook(message: Message, command: CommandObject) -> None:
         if message.from_user is None:
             return
-        expiry = (command.args or "1d").split()[0]
+        arguments = _hook_arguments(command.args)
+        if arguments is None:
+            await message.answer(f"Usage: {_WEBHOOK_COMMAND}")
+            return
+        project_id, view_ids = arguments
         try:
-            target = _webhook_target(config, message.from_user.id, expiry, message.chat.id)
-        except InvalidRouteTag as exc:
-            await message.answer(f"Invalid expiry: {html.escape(str(exc))}")
+            client = await token_service.client_for_telegram_action(
+                TelegramInteraction(message.from_user.id)
+            )
+            target = await _create_hook_target(
+                database=database,
+                config=config,
+                client=client,
+                project_id=project_id,
+                telegram_user_id=message.from_user.id,
+                chat_id=message.chat.id,
+                view_ids=view_ids,
+            )
+        except (HookConfigurationError, TokenBindingError, TokenIdentityChangedError) as exc:
+            await message.answer(html.escape(str(exc)))
             return
         await message.answer(
-            "Create a project webhook in Vikunja with this target URL "
-            "and the task events you need:\n"
+            "Create a project webhook in Vikunja with this target URL and the task events "
+            "you need:\n"
             f"<code>{html.escape(target)}</code>\n\n"
-            "The tag grants this Telegram user access only until the expiry "
-            "calculated from each event. For a group/channel, its chat id is "
-            "included as the recipient and your Telegram id stays "
-            "the allowed actor."
+            "The URL contains only an opaque UUID. Its destination, actor permission, and "
+            "selected views are stored in the bot database."
         )
+
+    @router.message(Command("views"))
+    async def views(message: Message, command: CommandObject) -> None:
+        if message.from_user is None or not (command.args or "").strip().isdigit():
+            await message.answer(f"Usage: {_VIEWS_COMMAND}")
+            return
+        project_id = int((command.args or "").strip())
+        try:
+            client = await token_service.client_for_telegram_action(
+                TelegramInteraction(message.from_user.id)
+            )
+            project_views = await client.project_views(project_id)
+        except (TokenBindingError, TokenIdentityChangedError) as exc:
+            await message.answer(html.escape(str(exc)))
+            return
+        except VikunjaAPIError as exc:
+            await message.answer(_api_error_message(exc))
+            return
+        kanban = [view for view in project_views if view.get("view_kind") == "kanban"]
+        if not kanban:
+            await message.answer("This project has no Kanban views.")
+            return
+        lines = ["Kanban views:"]
+        for view in kanban:
+            view_id = view.get("id")
+            title = view.get("title")
+            if isinstance(view_id, int) and isinstance(title, str):
+                lines.append(f"• <code>{view_id}</code> — {html.escape(title)}")
+        await message.answer("\n".join(lines))
 
     @router.message(Command("install_webhook"))
     async def install_webhook(message: Message, command: CommandObject) -> None:
         if message.from_user is None:
             return
-        arguments = (command.args or "").split()
-        if not arguments or not arguments[0].isdigit():
+        arguments = _hook_arguments(command.args)
+        if arguments is None:
             await message.answer(f"Usage: {_INSTALL_WEBHOOK_COMMAND}")
             return
-        expiry = arguments[1] if len(arguments) > 1 else "1d"
+        project_id, view_ids = arguments
         try:
-            target = _webhook_target(config, message.from_user.id, expiry, message.chat.id)
             client = await token_service.client_for_telegram_action(
                 TelegramInteraction(message.from_user.id)
             )
-            await client.create_project_webhook(int(arguments[0]), target, _TASK_EVENTS)
-        except (TokenBindingError, TokenIdentityChangedError) as exc:
+            target = await _create_hook_target(
+                database=database,
+                config=config,
+                client=client,
+                project_id=project_id,
+                telegram_user_id=message.from_user.id,
+                chat_id=message.chat.id,
+                view_ids=view_ids,
+            )
+            await client.create_project_webhook(project_id, target, _TASK_EVENTS)
+        except (HookConfigurationError, TokenBindingError, TokenIdentityChangedError) as exc:
             await message.answer(html.escape(str(exc)))
             return
-        except (InvalidRouteTag, VikunjaAPIError) as exc:
+        except VikunjaAPIError as exc:
             await message.answer(_error_message(exc))
             return
         await message.answer(
@@ -172,27 +229,41 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
                 "For your security, install a channel webhook from a private chat."
             )
             return
-        arguments = (command.args or "").split()
-        if not arguments or not arguments[0].isdigit() or message.reply_to_message is None:
+        arguments = _hook_arguments(command.args)
+        if arguments is None or message.reply_to_message is None:
             await message.answer(
                 "Forward any post from the target channel here, then reply to it with "
                 f"{_INSTALL_CHANNEL_WEBHOOK_COMMAND}."
             )
             return
-        expiry = arguments[1] if len(arguments) > 1 else "1d"
+        project_id, view_ids = arguments
         try:
             destination = await _channel_discussion_from_forward(
                 bot, message.reply_to_message, message.from_user.id
             )
-            target = _channel_webhook_target(config, message.from_user.id, expiry, destination)
             client = await token_service.client_for_telegram_action(
                 TelegramInteraction(message.from_user.id)
             )
-            await client.create_project_webhook(int(arguments[0]), target, _TASK_EVENTS)
-        except (ChannelBindingError, TokenBindingError, TokenIdentityChangedError) as exc:
+            target = await _create_hook_target(
+                database=database,
+                config=config,
+                client=client,
+                project_id=project_id,
+                telegram_user_id=message.from_user.id,
+                chat_id=destination.channel_id,
+                discussion_chat_id=destination.discussion_chat_id,
+                view_ids=view_ids,
+            )
+            await client.create_project_webhook(project_id, target, _TASK_EVENTS)
+        except (
+            ChannelBindingError,
+            HookConfigurationError,
+            TokenBindingError,
+            TokenIdentityChangedError,
+        ) as exc:
             await message.answer(html.escape(str(exc)))
             return
-        except (InvalidRouteTag, VikunjaAPIError) as exc:
+        except VikunjaAPIError as exc:
             await message.answer(_error_message(exc))
             return
         await message.answer(
@@ -212,16 +283,14 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
     async def task_message_reply(message: Message) -> None:
         if message.from_user is None or message.reply_to_message is None or not message.text:
             return
-        linked = _task_message_for_reply(database, message)
+        linked = await _task_message_for_reply(database, message)
         if linked is None:
             return
         if linked.expires_at <= utc_now():
             await message.reply("This event permission has expired; create a fresh webhook route.")
             return
         if not linked.allowed_telegram_user_ids:
-            await message.reply(
-                "This channel route is read-only: it has no telegram-id actor grant."
-            )
+            await message.reply("This channel route is read-only: it has no Telegram actor grant.")
             return
         if message.from_user.id not in linked.allowed_telegram_user_ids:
             await message.reply(
@@ -260,7 +329,7 @@ async def _set_comment_updates(
     if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
         await message.answer("Only a group administrator can change this setting.")
         return
-    database.set_comment_updates_enabled(message.chat.id, enabled)
+    await database.set_comment_updates_enabled(message.chat.id, enabled)
     if enabled:
         await message.answer("Human-readable task update summaries are now enabled in this group.")
     else:
@@ -317,38 +386,86 @@ async def _channel_discussion_from_forward(
     return ChannelDiscussion(channel_id=channel.id, discussion_chat_id=channel.linked_chat_id)
 
 
-def _task_message_for_reply(database: Database, message: Message) -> TaskMessage | None:
+def _hook_arguments(value: str | None) -> tuple[int, tuple[int, ...]] | None:
+    arguments = (value or "").split()
+    if not arguments or len(arguments) > 2 or not arguments[0].isdigit():
+        return None
+    project_id = int(arguments[0])
+    if project_id <= 0:
+        return None
+    if len(arguments) == 1:
+        return project_id, ()
+    raw_view_ids = arguments[1].split(",")
+    if not raw_view_ids or any(not item.isdigit() or int(item) <= 0 for item in raw_view_ids):
+        return None
+    view_ids = tuple(dict.fromkeys(int(item) for item in raw_view_ids))
+    return project_id, view_ids
+
+
+async def _create_hook_target(
+    *,
+    database: Database,
+    config: Settings,
+    client: VikunjaClient,
+    project_id: int,
+    telegram_user_id: int,
+    chat_id: int,
+    view_ids: tuple[int, ...],
+    discussion_chat_id: int | None = None,
+) -> str:
+    views = await _selected_kanban_views(client, project_id, view_ids)
+    if views and not config.vikunjbot_service_token:
+        raise HookConfigurationError(
+            "VIKUNJBOT_SERVICE_TOKEN is required when a hook displays configured Kanban views"
+        )
+    hook = await database.create_hook(
+        project_id=project_id,
+        chat_id=chat_id,
+        discussion_chat_id=discussion_chat_id,
+        allowed_telegram_user_ids=frozenset({telegram_user_id}),
+        views=views,
+    )
+    return f"{config.relay_webhook_url.rstrip('/')}/{hook.id}"
+
+
+async def _selected_kanban_views(
+    client: VikunjaClient, project_id: int, view_ids: tuple[int, ...]
+) -> tuple[HookView, ...]:
+    if not view_ids:
+        return ()
+    available = {
+        int(view["id"]): view
+        for view in await client.project_views(project_id)
+        if isinstance(view.get("id"), int) and view.get("view_kind") == "kanban"
+    }
+    selected: list[HookView] = []
+    for view_id in view_ids:
+        view = available.get(view_id)
+        title = view.get("title") if view is not None else None
+        if not isinstance(title, str) or not title.strip():
+            raise HookConfigurationError(
+                f"Kanban view {view_id} does not exist in project {project_id}; "
+                f"use {_VIEWS_COMMAND} to list available views"
+            )
+        selected.append(HookView(project_view_id=view_id, title=title.strip()))
+    return tuple(selected)
+
+
+async def _task_message_for_reply(database: Database, message: Message) -> TaskMessage | None:
     """Resolve replies in a group or under an automatic forward of a channel post."""
     reply = message.reply_to_message
     if reply is None:  # pragma: no cover - enforced by the router filter
         return None
-    direct = database.find_task_message(message.chat.id, reply.message_id)
+    direct = await database.find_task_message(message.chat.id, reply.message_id)
     if direct is not None:
         return direct
     if not reply.is_automatic_forward or not isinstance(reply.forward_origin, MessageOriginChannel):
         return None
-    return database.find_discussion_task_message(
+    return await database.find_discussion_task_message(
         message.chat.id,
         reply.forward_origin.chat.id,
         reply.forward_origin.message_id,
     )
-
-
-def _webhook_target(config: Settings, telegram_user_id: int, expiry: str, chat_id: int) -> str:
-    tag = make_route_tag(telegram_user_id, expiry, chat_id)
-    return f"{config.relay_webhook_url.rstrip('/')}/{tag}"
-
-
-def _channel_webhook_target(
-    config: Settings, telegram_user_id: int, expiry: str, destination: ChannelDiscussion
-) -> str:
-    tag = make_route_tag(
-        telegram_user_id,
-        expiry,
-        channel_id=destination.channel_id,
-        discussion_chat_id=destination.discussion_chat_id,
-    )
-    return f"{config.relay_webhook_url.rstrip('/')}/{tag}"
 
 
 def _api_error_message(error: VikunjaAPIError) -> str:
@@ -386,8 +503,7 @@ _TASK_EVENTS = [
 async def run_bot(config: Settings = settings) -> None:
     if not config.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
-    database = Database(config.app_db_path)
-    database.initialize()
+    database = Database(config.database_url)
     bot = create_telegram_bot(config)
     dispatcher = create_dispatcher(bot, database, config)
     worker = EventWorker(bot, database, config)
@@ -397,6 +513,7 @@ async def run_bot(config: Settings = settings) -> None:
             BotCommand(command="login", description="Connect a Vikunja API token"),
             BotCommand(command="logout", description="Remove the connected token"),
             BotCommand(command="webhook", description="Show a webhook target URL"),
+            BotCommand(command="views", description="List project Kanban views"),
             BotCommand(command="install_webhook", description="Create a project webhook"),
             BotCommand(
                 command="install_channel_webhook", description="Connect a channel and discussion"
@@ -414,6 +531,7 @@ async def run_bot(config: Settings = settings) -> None:
         worker_task.cancel()
         await asyncio.gather(worker_task, return_exceptions=True)
         await bot.session.close()
+        await database.dispose()
 
 
 def main() -> None:

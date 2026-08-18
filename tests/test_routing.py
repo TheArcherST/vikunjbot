@@ -1,76 +1,27 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
-from vikunjbot.routing import DeliveryRoute, InvalidRouteTag, make_route_tag, parse_route_tag
+from vikunjbot.routing import InvalidRouteTag, parse_hook_id
 
 
-def test_direct_route_grants_the_recipient_access() -> None:
-    event_time = datetime(2026, 8, 18, 12, tzinfo=UTC)
+def test_canonical_uuid_is_a_valid_hook_tag() -> None:
+    hook_id = uuid4()
 
-    routes = parse_route_tag("*/telegram-id:12345,expiry:12h/*", event_time)
-
-    assert len(routes) == 1
-    assert routes[0].chat_id == 12345
-    assert routes[0].allowed_telegram_user_ids == frozenset({12345})
-    assert routes[0].expires_at == event_time + timedelta(hours=12)
+    assert parse_hook_id(str(hook_id)) == hook_id
 
 
-def test_group_route_does_not_duplicate_to_the_actor_private_chat() -> None:
-    event_time = datetime(2026, 8, 18, 12, tzinfo=UTC)
-
-    routes = parse_route_tag("telegram-id:12345,telegram-chat-id:-100987,expiry:1d", event_time)
-
-    assert len(routes) == 1
-    assert routes[0].chat_id == -100987
-    assert routes[0].allowed_telegram_user_ids == frozenset({12345})
-
-
-def test_route_requires_a_bounded_expiry() -> None:
-    with pytest.raises(InvalidRouteTag, match="expiry"):
-        parse_route_tag("telegram-id:12345", datetime(2026, 8, 18, tzinfo=UTC))
-
-
-def test_canonical_tag_can_target_a_group() -> None:
-    assert make_route_tag(12345, "30m", -100987) == (
-        "telegram-id:12345,telegram-chat-id:-100987,expiry:30m"
-    )
-
-
-def test_channel_route_keeps_the_linked_discussion_as_an_access_boundary() -> None:
-    event_time = datetime(2026, 8, 18, 12, tzinfo=UTC)
-
-    routes = parse_route_tag(
-        "telegram-id:12345,telegram-channel-id:-100111,"
-        "telegram-discussion-chat-id:-100222,expiry:1d",
-        event_time,
-    )
-
-    assert routes == (
-        DeliveryRoute(
-            chat_id=-100111,
-            discussion_chat_id=-100222,
-            allowed_telegram_user_ids=frozenset({12345}),
-            expires_at=event_time + timedelta(days=1),
-        ),
-    )
-    assert (
-        make_route_tag(
-            12345,
-            "1d",
-            channel_id=-100111,
-            discussion_chat_id=-100222,
-        )
-        == "telegram-id:12345,telegram-channel-id:-100111,"
-        "telegram-discussion-chat-id:-100222,expiry:1d"
-    )
-
-
-def test_channel_route_requires_its_linked_discussion() -> None:
-    with pytest.raises(InvalidRouteTag, match="linked discussion"):
-        parse_route_tag(
-            "telegram-id:12345,telegram-channel-id:-100111,expiry:1d",
-            datetime(2026, 8, 18, tzinfo=UTC),
-        )
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "telegram-id:12345,expiry:1d",
+        "4f00f7b4-a5f8-4e10-8c24-3d5bc2f52d21/extra",
+        "{4f00f7b4-a5f8-4e10-8c24-3d5bc2f52d21}",
+    ],
+)
+def test_hook_tag_must_be_a_canonical_uuid(value: str) -> None:
+    with pytest.raises(InvalidRouteTag, match="UUID"):
+        parse_hook_id(value)

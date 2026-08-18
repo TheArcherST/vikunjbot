@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from vikunjbot.database import HookView
 from vikunjbot.event_worker import _merge_event_bucket, _needs_bucket_enrichment
 from vikunjbot.task_text import render_task, task_snapshot
 
@@ -89,3 +90,19 @@ def test_unknown_bucket_is_not_presented_as_an_id() -> None:
     rendered = render_task({"title": "Move me", "bucket_id": 8})
 
     assert "Bucket:" not in rendered
+
+
+def test_selected_kanban_views_render_their_own_current_bucket_names() -> None:
+    rendered = render_task(
+        {
+            "title": "Move me",
+            "buckets": [
+                {"project_view_id": 7, "title": "In progress"},
+                {"project_view_id": 9, "title": "Ready to publish"},
+            ],
+        },
+        (HookView(7, "Engineering"), HookView(9, "Release")),
+    )
+
+    assert "📥 Engineering: In progress" in rendered
+    assert "📥 Release: Ready to publish" in rendered

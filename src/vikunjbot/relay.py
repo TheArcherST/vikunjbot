@@ -2,29 +2,30 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response, status
+from sqlalchemy.exc import SQLAlchemyError
 
 from vikunjbot.database import Database
-from vikunjbot.routing import InvalidRouteTag, parse_route_tag
+from vikunjbot.routing import InvalidRouteTag, parse_hook_id
 from vikunjbot.settings import Settings, settings
-from vikunjbot.timeutils import parse_event_time
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(config: Settings = settings) -> FastAPI:
-    database = Database(config.app_db_path)
+def create_app(config: Settings = settings, database: Database | None = None) -> FastAPI:
+    database = database or Database(config.database_url)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        database.initialize()
-        yield
+        try:
+            yield
+        finally:
+            await database.dispose()
 
     app = FastAPI(title="vikunjbot event relay", lifespan=lifespan)
     app.state.database = database
@@ -53,20 +54,25 @@ def create_app(config: Settings = settings) -> FastAPI:
         if not route_tag:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="the webhook URL must contain an explicit expiring route tag",
+                detail="the webhook URL must contain a hook UUID",
             )
         try:
-            parse_route_tag(route_tag, parse_event_time(payload["time"]))
+            hook_id = parse_hook_id(route_tag)
         except InvalidRouteTag as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"invalid route tag: {exc}",
             ) from exc
         try:
-            event_id, created = database.enqueue_event(route_tag, raw_body, payload)
-        except (OSError, sqlite3.Error) as exc:
-            # Never report acceptance when the durable write failed: disk full,
-            # a read-only mount, or a SQLite I/O fault must result in a retry.
+            if await database.get_active_hook(hook_id) is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="unknown or inactive hook",
+                )
+            event_id, created = await database.enqueue_event(hook_id, raw_body, payload)
+        except SQLAlchemyError as exc:
+            # Never report acceptance when the durable write failed. Vikunja can
+            # retry the webhook after a database outage.
             logger.exception("Could not persist webhook delivery")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="relay storage unavailable"
@@ -127,6 +133,3 @@ def main() -> None:
         level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
     uvicorn.run(create_app(), host=settings.relay_host, port=settings.relay_port)
-
-
-app = create_app()

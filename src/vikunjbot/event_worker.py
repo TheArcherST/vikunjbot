@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import ReactionTypeEmoji, ReplyParameters
 
-from vikunjbot.database import Database, StoredEvent
-from vikunjbot.routing import DeliveryRoute, InvalidRouteTag, parse_route_tag
+from vikunjbot.database import Database, Hook, StoredEvent
 from vikunjbot.settings import Settings
 from vikunjbot.task_text import change_summary, render_project_event, render_task, task_snapshot
 from vikunjbot.timeutils import utc_now
@@ -28,17 +28,22 @@ class EventEnricher:
             else None
         )
 
-    async def task(self, event: StoredEvent) -> dict[str, Any] | None:
+    async def task(self, event: StoredEvent, hook: Hook) -> dict[str, Any] | None:
         data = event.payload.get("data")
         embedded = data.get("task") if isinstance(data, dict) else None
         if isinstance(embedded, dict):
             if (
-                _needs_bucket_enrichment(embedded)
+                (hook.views or _needs_bucket_enrichment(embedded))
                 and self._client is not None
                 and event.task_id is not None
             ):
                 try:
                     enriched = await self._client.get_task(event.task_id, expand_buckets=True)
+                    if hook.views:
+                        # A configured view is an explicit request for the current
+                        # per-view state, rather than the often incomplete generic
+                        # task object supplied by a webhook.
+                        return enriched
                     return _merge_event_bucket(embedded, enriched)
                 except VikunjaAPIError:
                     logger.warning(
@@ -62,68 +67,61 @@ class EventWorker:
         self._enricher = EventEnricher(config)
 
     async def run(self) -> None:
-        self._database.initialize()
         while True:
             handled = await self.process_one()
             if not handled:
                 await asyncio.sleep(self._config.worker_poll_seconds)
 
     async def process_one(self) -> bool:
-        event = self._database.claim_next_event(self._config.relay_lease_seconds)
+        event = await self._database.claim_next_event(self._config.relay_lease_seconds)
         if event is None:
             return False
         try:
             await self._deliver(event)
         except Exception as exc:
             logger.exception("Event %s delivery failed", event.id)
-            self._database.retry_event(
+            await self._database.retry_event(
                 event.id,
                 event.attempts,
                 str(exc),
                 self._config.worker_max_backoff_seconds,
             )
         else:
-            self._database.complete_event(event.id)
+            await self._database.complete_event(event.id)
         return True
 
     async def _deliver(self, event: StoredEvent) -> None:
-        try:
-            routes = parse_route_tag(event.route_tag, event.event_time)
-        except InvalidRouteTag as exc:
-            # This only protects rows accepted by an earlier relay version. A
-            # malformed route can never be made valid by retrying its event.
-            logger.warning("Ignoring event %s with invalid route tag: %s", event.id, exc)
+        hook = await self._database.get_active_hook(event.hook_id)
+        if hook is None:
+            # An operator may deactivate a hook after the relay accepted an event.
+            # In that case it must not reach the former Telegram destination.
+            logger.info("Ignoring event %s for inactive hook %s", event.id, event.hook_id)
             return
-        if all(route.expires_at <= utc_now() for route in routes):
+        expires_at = event.event_time + timedelta(seconds=hook.event_permission_ttl_seconds)
+        if expires_at <= utc_now():
             logger.info("Ignoring expired event %s", event.id)
             return
-        task = await self._enricher.task(event)
+        task = await self._enricher.task(event, hook)
         if task is None or event.task_id is None:
             if event.event_name.startswith("project."):
-                await self._deliver_project_event(event, routes)
+                await self._deliver_project_event(event, hook)
                 return
             logger.info("Ignoring non-task event %s (%s)", event.id, event.event_name)
             return
-        for route in routes:
-            if route.expires_at > utc_now():
-                await self._deliver_task(event, task, route)
+        await self._deliver_task(event, task, hook, expires_at)
 
-    async def _deliver_project_event(
-        self, event: StoredEvent, routes: tuple[DeliveryRoute, ...]
-    ) -> None:
+    async def _deliver_project_event(self, event: StoredEvent, hook: Hook) -> None:
         text = render_project_event(event.event_name, event.payload)
-        for route in routes:
-            if route.expires_at > utc_now():
-                await self._bot.send_message(chat_id=route.chat_id, text=text)
+        await self._bot.send_message(chat_id=hook.chat_id, text=text)
 
     async def _deliver_task(
-        self, event: StoredEvent, task: dict[str, Any], route: DeliveryRoute
+        self, event: StoredEvent, task: dict[str, Any], hook: Hook, expires_at: datetime
     ) -> None:
-        current_snapshot = task_snapshot(task)
-        existing = self._database.get_task_message(route.chat_id, event.task_id or 0)
-        text = render_task(task)
+        current_snapshot = task_snapshot(task, hook.views)
+        existing = await self._database.get_task_message(hook.id, event.task_id or 0)
+        text = render_task(task, hook.views)
         if existing is None:
-            sent = await self._bot.send_message(chat_id=route.chat_id, text=text)
+            sent = await self._bot.send_message(chat_id=hook.chat_id, text=text)
             message_id = sent.message_id
             previous_snapshot: dict[str, Any] = {}
         else:
@@ -132,7 +130,7 @@ class EventWorker:
             try:
                 await self._bot.edit_message_text(
                     text=text,
-                    chat_id=route.chat_id,
+                    chat_id=hook.chat_id,
                     message_id=message_id,
                 )
             except TelegramBadRequest as exc:
@@ -140,14 +138,15 @@ class EventWorker:
                 # mapping makes retrying a crashed delivery safe in that common case.
                 if "message is not modified" not in str(exc).lower():
                     raise
-        self._database.save_task_message(
-            route.chat_id,
-            event.task_id or 0,
-            message_id,
-            route.expires_at,
-            route.allowed_telegram_user_ids,
-            current_snapshot,
-            discussion_chat_id=route.discussion_chat_id,
+        await self._database.save_task_message(
+            hook_id=hook.id,
+            chat_id=hook.chat_id,
+            task_id=event.task_id or 0,
+            message_id=message_id,
+            expires_at=expires_at,
+            allowed_telegram_user_ids=hook.allowed_telegram_user_ids,
+            snapshot=current_snapshot,
+            discussion_chat_id=hook.discussion_chat_id,
         )
         should_sync_done_reaction = (
             current_snapshot["done"]
@@ -156,20 +155,20 @@ class EventWorker:
         )
         if should_sync_done_reaction:
             await self._sync_done_reaction(
-                chat_id=route.chat_id,
+                chat_id=hook.chat_id,
                 message_id=message_id,
                 is_done=current_snapshot["done"],
             )
         if (
             existing is not None
-            and route.discussion_chat_id is None
-            and self._database.comment_updates_enabled(route.chat_id)
+            and hook.discussion_chat_id is None
+            and await self._database.comment_updates_enabled(hook.chat_id)
         ):
             summary = change_summary(
                 event.event_name, previous_snapshot, current_snapshot, event.payload
             )
             await self._bot.send_message(
-                chat_id=route.chat_id,
+                chat_id=hook.chat_id,
                 text=summary,
                 reply_parameters=ReplyParameters(message_id=message_id),
             )

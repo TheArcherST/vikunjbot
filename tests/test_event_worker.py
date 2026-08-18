@@ -49,14 +49,15 @@ class ReactionRejectingBot(FakeBot):
 
 
 async def test_task_updates_edit_the_original_telegram_message(
-    config: Settings, event_payload: Callable[..., dict[str, Any]]
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
-    database = Database(config.app_db_path)
-    database.initialize()
+    hook = await database.create_hook(
+        project_id=1, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+    )
     first = event_payload()
     second = event_payload(event_name="task.updated", title="Write more tests")
-    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(first).encode(), first)
-    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(second).encode(), second)
+    await database.enqueue_event(hook.id, json.dumps(first).encode(), first)
+    await database.enqueue_event(hook.id, json.dumps(second).encode(), second)
     bot = FakeBot()
     worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
 
@@ -71,15 +72,16 @@ async def test_task_updates_edit_the_original_telegram_message(
 
 
 async def test_done_state_is_reflected_by_the_bot_reaction(
-    config: Settings, event_payload: Callable[..., dict[str, Any]]
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
-    database = Database(config.app_db_path)
-    database.initialize()
+    hook = await database.create_hook(
+        project_id=1, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+    )
     completed = event_payload()
     completed["data"]["task"]["done"] = True
     reopened = event_payload(event_name="task.updated")
-    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(completed).encode(), completed)
-    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(reopened).encode(), reopened)
+    await database.enqueue_event(hook.id, json.dumps(completed).encode(), completed)
+    await database.enqueue_event(hook.id, json.dumps(reopened).encode(), reopened)
     bot = FakeBot()
     worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
 
@@ -90,13 +92,14 @@ async def test_done_state_is_reflected_by_the_bot_reaction(
 
 
 async def test_reaction_rejection_does_not_retry_task_delivery(
-    config: Settings, event_payload: Callable[..., dict[str, Any]]
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
-    database = Database(config.app_db_path)
-    database.initialize()
+    hook = await database.create_hook(
+        project_id=1, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+    )
     completed = event_payload()
     completed["data"]["task"]["done"] = True
-    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(completed).encode(), completed)
+    await database.enqueue_event(hook.id, json.dumps(completed).encode(), completed)
     bot = ReactionRejectingBot()
     worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
 
@@ -105,15 +108,18 @@ async def test_reaction_rejection_does_not_retry_task_delivery(
     assert await worker.process_one() is False
 
 
-async def test_project_events_are_forwarded_without_a_task_mapping(config: Settings) -> None:
-    database = Database(config.app_db_path)
-    database.initialize()
+async def test_project_events_are_forwarded_without_a_task_mapping(
+    config: Settings, database: Database
+) -> None:
+    hook = await database.create_hook(
+        project_id=5, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+    )
     payload = {
         "event_name": "project.updated",
         "time": "2026-08-18T12:00:00+00:00",
         "data": {"project": {"id": 5, "title": "Roadmap"}},
     }
-    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(payload).encode(), payload)
+    await database.enqueue_event(hook.id, json.dumps(payload).encode(), payload)
     bot = FakeBot()
     worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
 
@@ -122,36 +128,38 @@ async def test_project_events_are_forwarded_without_a_task_mapping(config: Setti
 
 
 async def test_channel_route_publishes_in_the_channel_and_records_its_discussion(
-    config: Settings, event_payload: Callable[..., dict[str, Any]]
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
-    database = Database(config.app_db_path)
-    database.initialize()
-    payload = event_payload()
-    database.enqueue_event(
-        "telegram-id:12,telegram-channel-id:-100111,telegram-discussion-chat-id:-100222,expiry:1d",
-        json.dumps(payload).encode(),
-        payload,
+    hook = await database.create_hook(
+        project_id=1,
+        chat_id=-100111,
+        discussion_chat_id=-100222,
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
     )
+    payload = event_payload()
+    await database.enqueue_event(hook.id, json.dumps(payload).encode(), payload)
     bot = FakeBot()
     worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
 
     assert await worker.process_one() is True
     assert bot.sent[0][0] == -100111
-    task_message = database.get_task_message(-100111, 42)
+    task_message = await database.get_task_message(hook.id, 42)
     assert task_message is not None
     assert task_message.discussion_chat_id == -100222
 
 
 async def test_bucket_move_edits_the_persistent_task_message(
-    config: Settings, event_payload: Callable[..., dict[str, Any]]
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
-    database = Database(config.app_db_path)
-    database.initialize()
+    hook = await database.create_hook(
+        project_id=1, chat_id=12, allowed_telegram_user_ids=frozenset({12}), views=()
+    )
     created = event_payload()
     moved = event_payload(event_name="task.updated")
     moved["data"]["task"]["bucket"] = {"title": "Ready for review"}
-    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(created).encode(), created)
-    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(moved).encode(), moved)
+    await database.enqueue_event(hook.id, json.dumps(created).encode(), created)
+    await database.enqueue_event(hook.id, json.dumps(moved).encode(), moved)
     bot = FakeBot()
     worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
 

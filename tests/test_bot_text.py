@@ -17,7 +17,9 @@ def test_command_syntax_escapes_angle_brackets_for_html_parse_mode() -> None:
 
 def test_help_command_syntax_uses_html_safe_literals() -> None:
     assert _LOGIN_COMMAND == "<code>/login &lt;API token&gt;</code>"
-    assert _INSTALL_WEBHOOK_COMMAND == "<code>/install_webhook &lt;project-id&gt; [expiry]</code>"
+    assert _INSTALL_WEBHOOK_COMMAND == (
+        "<code>/install_webhook &lt;project-id&gt; [kanban-view-ids]</code>"
+    )
 
 
 def test_private_chat_check_uses_value_equality() -> None:

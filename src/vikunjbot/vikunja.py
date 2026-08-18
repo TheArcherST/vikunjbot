@@ -46,6 +46,12 @@ class VikunjaClient:
             json={"target_url": target_url, "events": events},
         )
 
+    async def project_views(self, project_id: int) -> list[dict[str, Any]]:
+        result = await self._request(
+            "GET", f"/projects/{project_id}/views", params={"per_page": 100}
+        )
+        return _as_object_list_or_list(result, "project views")
+
     async def labels(self, search: str) -> list[dict[str, Any]]:
         result = await self._request("GET", "/labels", params={"q": search, "per_page": 50})
         return _as_object_list(result, "labels")
@@ -125,3 +131,11 @@ def _as_object_list(value: dict[str, Any] | list[Any], name: str) -> list[dict[s
     if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
         raise VikunjaAPIError(502, f"Vikunja returned invalid {name}")
     return items
+
+
+def _as_object_list_or_list(value: dict[str, Any] | list[Any], name: str) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        if all(isinstance(item, dict) for item in value):
+            return value
+        raise VikunjaAPIError(502, f"Vikunja returned invalid {name}")
+    return _as_object_list(value, name)

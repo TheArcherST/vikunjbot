@@ -86,7 +86,7 @@ class TokenService:
         client = self._client_factory(self._api_base_url, token)
         identity = await client.whoami()
         user_id, username = _identity(identity)
-        self._database.save_token_binding(
+        await self._database.save_token_binding(
             telegram_user_id,
             self._cipher.encrypt(token),
             user_id,
@@ -95,7 +95,7 @@ class TokenService:
         return username
 
     async def client_for_telegram_action(self, interaction: TelegramInteraction) -> VikunjaClient:
-        binding = self._database.get_token_binding(interaction.telegram_user_id)
+        binding = await self._database.get_token_binding(interaction.telegram_user_id)
         if binding is None:
             raise TokenBindingError("send /login <Vikunja API token> in a private chat first")
         token = self._cipher.decrypt(binding.encrypted_token)
@@ -106,8 +106,8 @@ class TokenService:
             raise TokenIdentityChangedError("the token belongs to a different Vikunja account")
         return client
 
-    def unbind(self, telegram_user_id: int) -> bool:
-        return self._database.delete_token_binding(telegram_user_id)
+    async def unbind(self, telegram_user_id: int) -> bool:
+        return await self._database.delete_token_binding(telegram_user_id)
 
 
 def _identity(value: dict[str, object]) -> tuple[int, str]:

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-from pathlib import Path
 from urllib.parse import urlparse
 
 from pydantic import Field, HttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import URL
 
 
 class Settings(BaseSettings):
     """Runtime configuration shared by the relay and bot processes."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
 
-    app_db_path: Path = Path("/data/vikunjbot.sqlite3")
+    database_url_override: str = Field(default="", validation_alias="VIKUNJBOT_DATABASE_URL")
+    postgres_password: str = Field(default="", validation_alias="POSTGRES_PASSWORD")
     relay_host: str = "0.0.0.0"
     relay_port: int = 8080
     relay_max_body_bytes: int = 1_048_576
@@ -47,6 +48,25 @@ class Settings(BaseSettings):
     @property
     def vikunja_api_base_url(self) -> str:
         return str(self.vikunja_api_url).rstrip("/")
+
+    @property
+    def database_url(self) -> str:
+        """Return the dedicated bot database URL without exposing it in logs."""
+
+        if self.database_url_override:
+            return self.database_url_override
+        if not self.postgres_password:
+            raise RuntimeError(
+                "POSTGRES_PASSWORD or VIKUNJBOT_DATABASE_URL is required for vikunjbot storage"
+            )
+        return URL.create(
+            "postgresql+psycopg",
+            username="vikunjbot",
+            password=self.postgres_password,
+            host="vikunjbot-postgres",
+            port=5432,
+            database="vikunjbot",
+        ).render_as_string(hide_password=False)
 
 
 settings = Settings()

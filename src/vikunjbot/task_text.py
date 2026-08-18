@@ -3,8 +3,10 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from vikunjbot.database import HookView
 
-def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+
+def task_snapshot(task: dict[str, Any], views: tuple[HookView, ...] = ()) -> dict[str, Any]:
     """Keep only displayable task properties when comparing successive events."""
 
     return {
@@ -13,18 +15,22 @@ def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         "done": bool(task.get("done")),
         "due_date": _due_date(task.get("due_date")),
         "bucket": _bucket_name(task),
+        "view_buckets": _view_buckets(task, views),
         "labels": sorted(_names(task.get("labels"), title_key="title")),
         "assignees": sorted(_names(task.get("assignees"), title_key="username")),
     }
 
 
-def render_task(task: dict[str, Any]) -> str:
-    snapshot = task_snapshot(task)
+def render_task(task: dict[str, Any], views: tuple[HookView, ...] = ()) -> str:
+    snapshot = task_snapshot(task, views)
     title = html.escape(snapshot["title"] or "Untitled task")
     identifier = html.escape(snapshot["identifier"])
     heading = f"<b>{identifier}: {title}</b>" if identifier else f"<b>{title}</b>"
     lines = [heading, "✅ Completed" if snapshot["done"] else "⬜ Open"]
-    if snapshot["bucket"]:
+    if views:
+        for view_title, bucket_title in snapshot["view_buckets"]:
+            lines.append(f"📥 {html.escape(view_title)}: {html.escape(bucket_title)}")
+    elif snapshot["bucket"]:
         lines.append(f"📥 Bucket: {html.escape(snapshot['bucket'])}")
     if snapshot["due_date"]:
         lines.append(f"🗓 Due: {html.escape(_human_date(snapshot['due_date']))}")
@@ -77,6 +83,7 @@ def change_summary(
         "done": "status",
         "due_date": "due date",
         "bucket": "bucket",
+        "view_buckets": "buckets",
         "labels": "labels",
         "assignees": "assignees",
     }
@@ -112,6 +119,20 @@ def _buckets(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [candidate for candidate in value if isinstance(candidate, dict)]
+
+
+def _view_buckets(task: dict[str, Any], views: tuple[HookView, ...]) -> list[tuple[str, str]]:
+    if not views:
+        return []
+    buckets_by_view = {
+        bucket.get("project_view_id"): _text(bucket.get("title") or bucket.get("name"))
+        for bucket in _buckets(task.get("buckets"))
+    }
+    return [
+        (view.title, buckets_by_view[view.project_view_id])
+        for view in views
+        if buckets_by_view.get(view.project_view_id)
+    ]
 
 
 def _names(value: object, *, title_key: str) -> list[str]:

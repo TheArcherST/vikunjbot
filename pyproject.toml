@@ -7,10 +7,13 @@ requires-python = ">=3.12"
 dependencies = [
     "aiogram>=3.24,<4",
     "aiohttp-socks>=0.11,<1",
+    "alembic>=1.17,<2",
     "cryptography>=46,<47",
     "fastapi>=0.128,<1",
     "httpx>=0.28,<1",
     "pydantic-settings>=2.12,<3",
+    "psycopg[binary]>=3.2,<4",
+    "sqlalchemy>=2.0,<3",
     "uvicorn[standard]>=0.40,<1",
 ]
 
@@ -24,6 +27,7 @@ dev = [
 [project.scripts]
 vikunjbot-relay = "vikunjbot.relay:main"
 vikunjbot = "vikunjbot.bot:main"
+vikunjbot-migrate = "vikunjbot.migrate:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]

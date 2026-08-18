@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -63,16 +62,24 @@ async def test_channel_installation_rejects_a_non_admin_requester() -> None:
         )
 
 
-def test_discussion_reply_must_reference_an_automatic_forward_in_the_linked_group(tmp_path) -> None:
-    database = Database(tmp_path / "vikunjbot.sqlite3")
-    database.initialize()
-    database.save_task_message(
-        -100111,
-        42,
-        100,
-        datetime(2026, 8, 19, tzinfo=UTC),
-        frozenset({12}),
-        {},
+async def test_discussion_reply_must_reference_an_automatic_forward_in_the_linked_group(
+    database: Database,
+) -> None:
+    hook = await database.create_hook(
+        project_id=1,
+        chat_id=-100111,
+        discussion_chat_id=-100222,
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
+    )
+    await database.save_task_message(
+        hook_id=hook.id,
+        chat_id=-100111,
+        task_id=42,
+        message_id=100,
+        expires_at=datetime(2026, 8, 19, tzinfo=UTC),
+        allowed_telegram_user_ids=frozenset({12}),
+        snapshot={},
         discussion_chat_id=-100222,
     )
     channel_origin = MessageOriginChannel(
@@ -103,31 +110,6 @@ def test_discussion_reply_must_reference_an_automatic_forward_in_the_linked_grou
         reply_to_message=manual_forward,
     )
 
-    assert _task_message_for_reply(database, linked_reply) is not None  # type: ignore[arg-type]
-    assert _task_message_for_reply(database, unrelated_reply) is None  # type: ignore[arg-type]
-    assert _task_message_for_reply(database, manually_forwarded_reply) is None  # type: ignore[arg-type]
-
-
-def test_existing_database_is_migrated_for_channel_discussions(tmp_path) -> None:
-    path = tmp_path / "vikunjbot.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE task_messages (
-                chat_id INTEGER NOT NULL,
-                task_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
-                expires_at TEXT NOT NULL,
-                allowed_telegram_user_ids_json TEXT NOT NULL,
-                snapshot_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (chat_id, task_id)
-            )
-            """
-        )
-
-    Database(path).initialize()
-
-    with sqlite3.connect(path) as connection:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(task_messages)")}
-    assert "discussion_chat_id" in columns
+    assert await _task_message_for_reply(database, linked_reply) is not None  # type: ignore[arg-type]
+    assert await _task_message_for_reply(database, unrelated_reply) is None  # type: ignore[arg-type]
+    assert await _task_message_for_reply(database, manually_forwarded_reply) is None  # type: ignore[arg-type]
