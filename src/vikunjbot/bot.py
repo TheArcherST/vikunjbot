@@ -39,6 +39,11 @@ _LOGIN_COMMAND = _command_syntax("/login <API token>")
 _INSTALL_WEBHOOK_COMMAND = _command_syntax("/install_webhook <project-id> [expiry]")
 
 
+def _is_private_chat(chat_type: ChatType | str) -> bool:
+    """Aiogram currently deserializes `Chat.type` to a string at runtime."""
+    return chat_type == ChatType.PRIVATE
+
+
 def create_telegram_bot(config: Settings) -> Bot:
     """Create the bot session, optionally routing all Bot API calls through a proxy."""
     session = AiohttpSession(proxy=config.telegram_proxy_url)
@@ -71,7 +76,7 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
 
     @router.message(Command("login"))
     async def login(message: Message, command: CommandObject) -> None:
-        if message.chat.type is not ChatType.PRIVATE:
+        if not _is_private_chat(message.chat.type):
             await message.answer("For your security, send /login only in a private chat.")
             return
         if message.from_user is None or not command.args:
@@ -88,7 +93,7 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
 
     @router.message(Command("logout"))
     async def logout(message: Message) -> None:
-        if message.chat.type is not ChatType.PRIVATE or message.from_user is None:
+        if not _is_private_chat(message.chat.type) or message.from_user is None:
             await message.answer("Use /logout in a private chat.")
             return
         removed = token_service.unbind(message.from_user.id)
