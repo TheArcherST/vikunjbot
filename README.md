@@ -12,8 +12,8 @@ processes sharing one durable SQLite database:
 
 Keep this directory as `./vikunjbot` beside your instance's `compose.yaml`. Add the
 following reference configuration to that compose file. It assumes the existing
-Vikunja service is named `vikunja` and already connected to a private `backend`
-network.
+Vikunja service is named `vikunja`, runs Vikunja 2.4 or newer, and is connected to a
+private `backend` network. The bot uses Vikunja API v2 only.
 
 ```yaml
 services:
@@ -44,7 +44,7 @@ services:
       APP_DB_PATH: /data/vikunjbot.sqlite3
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
       TOKEN_ENCRYPTION_KEY: "${TOKEN_ENCRYPTION_KEY}"
-      VIKUNJA_API_URL: http://vikunja:3456/api/v1
+      VIKUNJA_API_URL: http://vikunja:3456/api/v2
       RELAY_WEBHOOK_URL: http://vikunjbot-event-relay:8080/events
       VIKUNJBOT_SERVICE_TOKEN: "${VIKUNJBOT_SERVICE_TOKEN:-}"
     command: ["vikunjbot"]
@@ -67,6 +67,9 @@ new bind mount writable.
 
 The relay deliberately does **not** verify an HMAC, as requested. Do not attach
 `vikunjbot-event-relay` to a public network, publish its port, or add a Traefik route.
+
+> **Security:** `ALLOWNONROUTABLEIPS` broadens Vikunja's outbound access. In a
+> multi-user instance, prefer a Mole proxy with an ACL limited to the relay.
 
 Add the required secrets to the environment used by Compose:
 

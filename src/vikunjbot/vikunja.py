@@ -41,30 +41,30 @@ class VikunjaClient:
         self, project_id: int, target_url: str, events: list[str]
     ) -> dict[str, Any]:
         return await self._request(
-            "PUT",
+            "POST",
             f"/projects/{project_id}/webhooks",
             json={"target_url": target_url, "events": events},
         )
 
     async def labels(self, search: str) -> list[dict[str, Any]]:
-        result = await self._request("GET", "/labels", params={"s": search, "per_page": 50})
+        result = await self._request("GET", "/labels", params={"q": search, "per_page": 50})
         return _as_object_list(result, "labels")
 
     async def create_label(self, title: str) -> dict[str, Any]:
-        return await self._request("PUT", "/labels", json={"title": title})
+        return await self._request("POST", "/labels", json={"title": title})
 
     async def task_labels(self, task_id: int) -> list[dict[str, Any]]:
         result = await self._request("GET", f"/tasks/{task_id}/labels", params={"per_page": 100})
         return _as_object_list(result, "task labels")
 
     async def add_task_label(self, task_id: int, label_id: int) -> dict[str, Any]:
-        return await self._request("PUT", f"/tasks/{task_id}/labels", json={"label_id": label_id})
+        return await self._request("POST", f"/tasks/{task_id}/labels", json={"label_id": label_id})
 
     async def remove_task_label(self, task_id: int, label_id: int) -> dict[str, Any]:
         return await self._request("DELETE", f"/tasks/{task_id}/labels/{label_id}")
 
     async def find_users(self, search: str) -> list[dict[str, Any]]:
-        result = await self._request("GET", "/users", params={"s": search, "per_page": 50})
+        result = await self._request("GET", "/users", params={"q": search, "per_page": 50})
         return _as_object_list(result, "users")
 
     async def task_assignees(self, task_id: int) -> list[dict[str, Any]]:
@@ -72,13 +72,13 @@ class VikunjaClient:
         return _as_object_list(result, "task assignees")
 
     async def add_task_assignee(self, task_id: int, user_id: int) -> dict[str, Any]:
-        return await self._request("PUT", f"/tasks/{task_id}/assignees", json={"user_id": user_id})
+        return await self._request("POST", f"/tasks/{task_id}/assignees", json={"user_id": user_id})
 
     async def remove_task_assignee(self, task_id: int, user_id: int) -> dict[str, Any]:
         return await self._request("DELETE", f"/tasks/{task_id}/assignees/{user_id}")
 
     async def add_task_comment(self, task_id: int, comment: str) -> dict[str, Any]:
-        return await self._request("PUT", f"/tasks/{task_id}/comments", json={"comment": comment})
+        return await self._request("POST", f"/tasks/{task_id}/comments", json={"comment": comment})
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
         headers = {"Authorization": f"Bearer {self._token}"}
@@ -110,13 +110,18 @@ def _response_detail(response: httpx.Response) -> str:
     except ValueError:
         return "request failed"
     if isinstance(body, dict):
-        message = body.get("message") or body.get("error")
+        message = (
+            body.get("detail") or body.get("title") or body.get("message") or body.get("error")
+        )
         if isinstance(message, str):
             return message[:500]
     return "request failed"
 
 
 def _as_object_list(value: dict[str, Any] | list[Any], name: str) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+    if not isinstance(value, dict):
         raise VikunjaAPIError(502, f"Vikunja returned invalid {name}")
-    return value
+    items = value.get("items")
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        raise VikunjaAPIError(502, f"Vikunja returned invalid {name}")
+    return items

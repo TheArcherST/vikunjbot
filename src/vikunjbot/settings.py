@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     worker_max_backoff_seconds: int = 300
     telegram_bot_token: str = ""
     token_encryption_key: str = ""
-    vikunja_api_url: HttpUrl = Field(default=HttpUrl("http://vikunja:3456/api/v1"))
+    vikunja_api_url: HttpUrl = Field(default=HttpUrl("http://vikunja:3456/api/v2"))
     relay_webhook_url: str = "http://vikunjbot-event-relay:8080/events"
     vikunjbot_service_token: str = ""
     log_level: str = "INFO"
