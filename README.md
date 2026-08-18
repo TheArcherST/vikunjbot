@@ -192,6 +192,12 @@ message. `/disable_comment_updates` reverses it. Channel routes deliberately omi
 these extra summaries: posting one separately would break Telegram's channel-to-
 discussion relationship; the original channel post is edited instead.
 
+When a task is completed, the bot also sets its own `✅` reaction on the persistent
+task message; it removes that reaction if the task is reopened. This is a visual
+indicator only — Vikunja remains the source of truth. The reaction must be allowed in
+the target chat or channel; an unavailable reaction is logged but never prevents task
+message delivery.
+
 Project update, deletion, and sharing events are also forwarded as standalone
 notifications. They do not represent a task and therefore have no reply-to-act mapping.
 

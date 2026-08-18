@@ -5,8 +5,8 @@ import logging
 from typing import Any
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import ReplyParameters
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.types import ReactionTypeEmoji, ReplyParameters
 
 from vikunjbot.database import Database, StoredEvent
 from vikunjbot.routing import DeliveryRoute, InvalidRouteTag, parse_route_tag
@@ -149,6 +149,17 @@ class EventWorker:
             current_snapshot,
             discussion_chat_id=route.discussion_chat_id,
         )
+        should_sync_done_reaction = (
+            current_snapshot["done"]
+            if existing is None
+            else previous_snapshot.get("done") != current_snapshot["done"]
+        )
+        if should_sync_done_reaction:
+            await self._sync_done_reaction(
+                chat_id=route.chat_id,
+                message_id=message_id,
+                is_done=current_snapshot["done"],
+            )
         if (
             existing is not None
             and route.discussion_chat_id is None
@@ -161,6 +172,25 @@ class EventWorker:
                 chat_id=route.chat_id,
                 text=summary,
                 reply_parameters=ReplyParameters(message_id=message_id),
+            )
+
+    async def _sync_done_reaction(self, *, chat_id: int, message_id: int, is_done: bool) -> None:
+        """Reflect completion without making task delivery depend on reactions."""
+
+        reaction = [ReactionTypeEmoji(emoji="✅")] if is_done else []
+        try:
+            await self._bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=message_id,
+                reaction=reaction,
+            )
+        except TelegramAPIError as exc:
+            logger.warning(
+                "Could not %s done reaction for Telegram message %s in chat %s: %s",
+                "set" if is_done else "clear",
+                message_id,
+                chat_id,
+                exc,
             )
 
 

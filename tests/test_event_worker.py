@@ -5,6 +5,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import SendMessage
+from aiogram.types import ReactionTypeEmoji
+
 from vikunjbot.database import Database
 from vikunjbot.event_worker import EventWorker
 from vikunjbot.settings import Settings
@@ -19,6 +23,7 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
         self.edited: list[tuple[int, int, str]] = []
+        self.reactions: list[tuple[int, int, list[str]]] = []
 
     async def send_message(self, chat_id: int, text: str, **_: object) -> SentMessage:
         self.sent.append((chat_id, text))
@@ -26,6 +31,21 @@ class FakeBot:
 
     async def edit_message_text(self, *, text: str, chat_id: int, message_id: int) -> None:
         self.edited.append((chat_id, message_id, text))
+
+    async def set_message_reaction(
+        self, *, chat_id: int, message_id: int, reaction: list[ReactionTypeEmoji]
+    ) -> None:
+        self.reactions.append((chat_id, message_id, [item.emoji for item in reaction]))
+
+
+class ReactionRejectingBot(FakeBot):
+    async def set_message_reaction(
+        self, *, chat_id: int, message_id: int, reaction: list[ReactionTypeEmoji]
+    ) -> None:
+        raise TelegramBadRequest(
+            method=SendMessage(chat_id=chat_id, text="test"),
+            message="reaction is not available",
+        )
 
 
 async def test_task_updates_edit_the_original_telegram_message(
@@ -47,6 +67,42 @@ async def test_task_updates_edit_the_original_telegram_message(
     assert bot.edited == [
         (12, 101, "<b>DEMO-42: Write more tests</b>\n⬜ Open\n📥 Bucket: Backlog")
     ]
+    assert bot.reactions == []
+
+
+async def test_done_state_is_reflected_by_the_bot_reaction(
+    config: Settings, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    database = Database(config.app_db_path)
+    database.initialize()
+    completed = event_payload()
+    completed["data"]["task"]["done"] = True
+    reopened = event_payload(event_name="task.updated")
+    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(completed).encode(), completed)
+    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(reopened).encode(), reopened)
+    bot = FakeBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+
+    assert await worker.process_one() is True
+    assert await worker.process_one() is True
+
+    assert bot.reactions == [(12, 101, ["✅"]), (12, 101, [])]
+
+
+async def test_reaction_rejection_does_not_retry_task_delivery(
+    config: Settings, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    database = Database(config.app_db_path)
+    database.initialize()
+    completed = event_payload()
+    completed["data"]["task"]["done"] = True
+    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(completed).encode(), completed)
+    bot = ReactionRejectingBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+
+    assert await worker.process_one() is True
+    assert bot.sent == [(12, "<b>DEMO-42: Write tests</b>\n✅ Completed\n📥 Bucket: Backlog")]
+    assert await worker.process_one() is False
 
 
 async def test_project_events_are_forwarded_without_a_task_mapping(config: Settings) -> None:
