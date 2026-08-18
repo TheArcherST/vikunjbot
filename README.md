@@ -40,13 +40,11 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    env_file:
+      - path: ./vikunjbot/.env
+        required: false
     environment:
       APP_DB_PATH: /data/vikunjbot.sqlite3
-      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
-      TOKEN_ENCRYPTION_KEY: "${TOKEN_ENCRYPTION_KEY}"
-      VIKUNJA_API_URL: http://vikunja:3456/api/v2
-      RELAY_WEBHOOK_URL: http://vikunjbot-event-relay:8080/events
-      VIKUNJBOT_SERVICE_TOKEN: "${VIKUNJBOT_SERVICE_TOKEN:-}"
     command: ["vikunjbot"]
     volumes:
       - ./vikunjbot-data:/data
@@ -71,11 +69,15 @@ The relay deliberately does **not** verify an HMAC, as requested. Do not attach
 > **Security:** `ALLOWNONROUTABLEIPS` broadens Vikunja's outbound access. In a
 > multi-user instance, prefer a Mole proxy with an ACL limited to the relay.
 
-Add the required secrets to the environment used by Compose:
+Create `./vikunjbot/.env` from `./vikunjbot/.env.example` and fill in the required
+values. The root `compose.yaml` loads this file only for the bot service, so these
+settings do not need to be in the root Compose project's `.env`:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=...
 TOKEN_ENCRYPTION_KEY=...
+# Optional: http://proxy.example:8080 or socks5://user:password@proxy.example:1080
+TELEGRAM_PROXY_URL=
 ```
 
 Generate the encryption key once with:
@@ -86,6 +88,27 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Do not rotate `TOKEN_ENCRYPTION_KEY` without first asking users to reconnect:
 existing encrypted bindings cannot be read with a new key.
+
+`TELEGRAM_PROXY_URL` is optional. When set, all Telegram Bot API requests (including
+polling, sends, and edits) use that HTTP, SOCKS4, or SOCKS5 proxy. Its URL must include
+a scheme, host, and port; URL-encode reserved characters in proxy credentials. Only
+the `vikunjbot` process uses the proxy; the relay and Vikunja traffic remain direct.
+If the proxy runs in another Docker network, attach that network to `vikunjbot` too;
+for example, an external Xray network can be connected with this Compose fragment
+(replace `xray_default` with its actual name):
+
+```yaml
+services:
+  vikunjbot:
+    networks:
+      - backend
+      - telegram-proxy
+
+networks:
+  telegram-proxy:
+    external: true
+    name: xray_default
+```
 
 Start or rebuild the host stack normally:
 

@@ -6,6 +6,7 @@ import logging
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.filters import Command
 from aiogram.filters.command import CommandObject
@@ -27,6 +28,16 @@ from vikunjbot.tokens import (
 from vikunjbot.vikunja import VikunjaAPIError
 
 logger = logging.getLogger(__name__)
+
+
+def create_telegram_bot(config: Settings) -> Bot:
+    """Create the bot session, optionally routing all Bot API calls through a proxy."""
+    session = AiohttpSession(proxy=config.telegram_proxy_url)
+    return Bot(
+        config.telegram_bot_token,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
 
 
 def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatcher:
@@ -230,7 +241,7 @@ async def run_bot(config: Settings = settings) -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
     database = Database(config.app_db_path)
     database.initialize()
-    bot = Bot(config.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = create_telegram_bot(config)
     dispatcher = create_dispatcher(bot, database, config)
     worker = EventWorker(bot, database, config)
     await bot.set_my_commands(
