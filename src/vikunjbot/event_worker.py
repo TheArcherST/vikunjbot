@@ -164,4 +164,4 @@ class EventWorker:
 
 
 def _needs_bucket_enrichment(task: dict[str, Any]) -> bool:
-    return isinstance(task.get("bucket_id"), int) and not isinstance(task.get("bucket"), dict)
+    return isinstance(task.get("bucket_id"), int) and not task_snapshot(task)["bucket"]

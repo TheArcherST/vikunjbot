@@ -185,7 +185,8 @@ Reply to a task message with any combination of:
 - Remaining text becomes a Vikunja comment from the linked Vikunja account.
 
 Task messages remain tied to a task ID, so later updates edit the same message even
-when its bucket or due date changes. In a group, an administrator can send
+when its bucket or due date changes. Vikunja's empty zero-time due date is omitted,
+rather than rendered as a deadline. In a group, an administrator can send
 `/enable_comment_updates`; updates then also generate a short reply under the task
 message. `/disable_comment_updates` reverses it. Channel routes deliberately omit
 these extra summaries: posting one separately would break Telegram's channel-to-
@@ -196,10 +197,12 @@ notifications. They do not represent a task and therefore have no reply-to-act m
 
 ## Optional `vikunjbot` service account
 
-Some event payloads do not contain a bucket title. Create a dedicated Vikunja account
-named `vikunjbot`, grant it read access to resources you want enriched, issue an API
-token, and set `VIKUNJBOT_SERVICE_TOKEN`. It is only used to read a task (including
-its buckets) when event data is incomplete. It never performs a user-requested write.
+Some event payloads contain only a Kanban `bucket_id`, or a bucket object without its
+title. Create a dedicated Vikunja account named `vikunjbot`, grant it read access to
+resources you want enriched, issue an API token, and set `VIKUNJBOT_SERVICE_TOKEN`.
+It is only used to read a task (including its buckets) when event data is incomplete;
+it never performs a user-requested write. Without this access, an unknown bucket is
+omitted rather than displayed as a potentially misleading numeric ID.
 
 ## Reliability model
 

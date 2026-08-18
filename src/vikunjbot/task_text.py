@@ -11,7 +11,7 @@ def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         "title": _text(task.get("title")),
         "identifier": _text(task.get("identifier")),
         "done": bool(task.get("done")),
-        "due_date": _text(task.get("due_date")),
+        "due_date": _due_date(task.get("due_date")),
         "bucket": _bucket_name(task),
         "labels": sorted(_names(task.get("labels"), title_key="title")),
         "assignees": sorted(_names(task.get("assignees"), title_key="username")),
@@ -96,13 +96,14 @@ def _bucket_name(task: dict[str, Any]) -> str:
             if value:
                 return value
     buckets = task.get("buckets")
+    if isinstance(buckets, dict):
+        buckets = list(buckets.values())
     if isinstance(buckets, list):
         bucket_id = task.get("bucket_id")
         for candidate in buckets:
             if isinstance(candidate, dict) and candidate.get("id") == bucket_id:
                 return _text(candidate.get("title") or candidate.get("name"))
-    bucket_id = task.get("bucket_id")
-    return f"#{bucket_id}" if isinstance(bucket_id, int) and bucket_id > 0 else ""
+    return ""
 
 
 def _names(value: object, *, title_key: str) -> list[str]:
@@ -119,6 +120,12 @@ def _names(value: object, *, title_key: str) -> list[str]:
 
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _due_date(value: object) -> str:
+    """Normalize Vikunja's Go zero-time representation to an absent due date."""
+    due_date = _text(value)
+    return "" if due_date.startswith("0001-01-01") else due_date
 
 
 def _human_date(value: str) -> str:

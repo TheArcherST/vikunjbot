@@ -84,3 +84,24 @@ async def test_channel_route_publishes_in_the_channel_and_records_its_discussion
     task_message = database.get_task_message(-100111, 42)
     assert task_message is not None
     assert task_message.discussion_chat_id == -100222
+
+
+async def test_bucket_move_edits_the_persistent_task_message(
+    config: Settings, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    database = Database(config.app_db_path)
+    database.initialize()
+    created = event_payload()
+    moved = event_payload(event_name="task.updated")
+    moved["data"]["task"]["bucket"] = {"title": "Ready for review"}
+    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(created).encode(), created)
+    database.enqueue_event("telegram-id:12,expiry:1d", json.dumps(moved).encode(), moved)
+    bot = FakeBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+
+    assert await worker.process_one() is True
+    assert await worker.process_one() is True
+
+    assert bot.edited == [
+        (12, 101, "<b>DEMO-42: Write tests</b>\n⬜ Open\n📥 Bucket: Ready for review")
+    ]
