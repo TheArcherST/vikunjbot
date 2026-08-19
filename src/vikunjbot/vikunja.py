@@ -46,6 +46,15 @@ class VikunjaClient:
             json={"target_url": target_url, "events": events},
         )
 
+    async def project_webhooks(self, project_id: int) -> list[dict[str, Any]]:
+        result = await self._request(
+            "GET", f"/projects/{project_id}/webhooks", params={"per_page": 100}
+        )
+        return _as_object_list_or_list(result, "project webhooks")
+
+    async def delete_project_webhook(self, project_id: int, webhook_id: int) -> None:
+        await self._request("DELETE", f"/projects/{project_id}/webhooks/{webhook_id}")
+
     async def project_views(self, project_id: int) -> list[dict[str, Any]]:
         result = await self._request(
             "GET", f"/projects/{project_id}/views", params={"per_page": 100}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from uuid import UUID
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -29,6 +30,7 @@ from vikunjbot.authorization import (
 from vikunjbot.database import Database, DeliveryDestination, HookView, TaskMessage
 from vikunjbot.event_worker import EventWorker
 from vikunjbot.hook_ui import (
+    delete_hook_confirmation_panel,
     fields_panel,
     hook_panel,
     hooks_list_panel,
@@ -407,6 +409,40 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
                     updated,
                     tuple((view.project_view_id, view.title) for view in available),
                 )
+            elif len(parts) == 3 and parts[1] == "d":
+                panel = delete_hook_confirmation_panel(hook)
+            elif len(parts) == 3 and parts[1] == "dx":
+                cleanup_failed = False
+                try:
+                    client = await token_service.client_for_telegram_action(
+                        TelegramInteraction(actor.user_id)
+                    )
+                    await _delete_matching_project_webhooks(
+                        client,
+                        hook.project_id,
+                        _hook_target_url(config, hook.id),
+                    )
+                except (
+                    TokenBindingError,
+                    TokenIdentityChangedError,
+                    VikunjaAPIError,
+                ) as exc:
+                    cleanup_failed = True
+                    logger.warning(
+                        "Could not remove Vikunja webhook for deleted hook %s: %s",
+                        hook.id,
+                        exc,
+                    )
+                deleted = await database.delete_owned_hook(hook.id, actor.user_id)
+                if not deleted:  # pragma: no cover - protected by ownership check above
+                    raise RuntimeError("hook ownership changed during deletion")
+                owned = await authorization_service.owned_hooks(actor)
+                panel = hooks_list_panel(owned)
+                notice = (
+                    "Hook deleted locally. Remove its webhook from Vikunja manually."
+                    if cleanup_failed
+                    else "Hook deleted."
+                )
             else:
                 raise ValueError("unknown hook panel action")
         except (HookConfigurationError, TokenBindingError, TokenIdentityChangedError) as exc:
@@ -593,7 +629,31 @@ async def _create_hook_target(
         allowed_telegram_user_ids=frozenset({telegram_user_id}),
         views=views,
     )
-    return f"{config.relay_webhook_url.rstrip('/')}/{hook.id}"
+    return _hook_target_url(config, hook.id)
+
+
+def _hook_target_url(config: Settings, hook_id: UUID) -> str:
+    return f"{config.relay_webhook_url.rstrip('/')}/{hook_id}"
+
+
+async def _delete_matching_project_webhooks(
+    client: VikunjaClient,
+    project_id: int,
+    target_url: str,
+) -> int:
+    """Remove every Vikunja webhook that targets this owned route."""
+
+    expected = target_url.rstrip("/")
+    matching_ids = {
+        webhook_id
+        for webhook in await client.project_webhooks(project_id)
+        if str(webhook.get("target_url", "")).rstrip("/") == expected
+        and isinstance((webhook_id := webhook.get("id")), int)
+        and webhook_id > 0
+    }
+    for webhook_id in sorted(matching_ids):
+        await client.delete_project_webhook(project_id, webhook_id)
+    return len(matching_ids)
 
 
 async def _selected_kanban_views(

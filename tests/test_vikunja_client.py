@@ -58,3 +58,33 @@ async def test_client_uses_v2_verbs_search_and_pagination() -> None:
     ]
     assert requests[0].url.params == httpx.QueryParams({"q": "urgent", "per_page": "50"})
     assert requests[1].url.params == httpx.QueryParams({"q": "alex", "per_page": "50"})
+
+
+async def test_client_lists_and_deletes_project_webhooks() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 8, "target_url": "http://relay/events/hook"}]},
+            )
+        return httpx.Response(200, json={"message": "deleted"})
+
+    client = VikunjaClient(
+        "http://vikunja:3456/api/v2",
+        "user-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert await client.project_webhooks(4) == [
+        {"id": 8, "target_url": "http://relay/events/hook"}
+    ]
+    await client.delete_project_webhook(4, 8)
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v2/projects/4/webhooks"),
+        ("DELETE", "/api/v2/projects/4/webhooks/8"),
+    ]
+    assert requests[0].url.params == httpx.QueryParams({"per_page": "100"})

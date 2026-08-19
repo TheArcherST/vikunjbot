@@ -54,6 +54,29 @@ async def test_relay_rejects_an_unknown_webhook(
     assert response.status_code == 404
 
 
+async def test_relay_acknowledges_late_deliveries_for_a_deleted_hook(
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    hook = await database.create_hook(
+        project_id=1,
+        owner_telegram_user_id=12,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
+    )
+    assert await database.delete_owned_hook(hook.id, 12)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(config, database)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(f"/events/{hook.id}", json=event_payload())
+
+    assert response.status_code == 202
+    assert response.json() == {"accepted": False, "deleted": True}
+    assert await database.claim_next_event(60) is None
+
+
 async def test_relay_rejects_a_non_uuid_tag(
     config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:

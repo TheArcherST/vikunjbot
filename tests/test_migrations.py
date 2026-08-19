@@ -118,7 +118,7 @@ async def test_migrations_upgrade_an_empty_database_to_head(test_database_url: s
         "deleted",
     } <= task_message_columns
     assert migrated_destination == (-100111, -100222)
-    assert {"owner_telegram_user_id", "task_display_fields"} <= hook_columns
+    assert {"owner_telegram_user_id", "task_display_fields", "deleted_at"} <= hook_columns
     assert migrated_hook_settings[0] == 12
     assert set(migrated_hook_settings[1]) == {
         "identifier",

@@ -64,7 +64,16 @@ def create_app(config: Settings = settings, database: Database | None = None) ->
                 detail=f"invalid route tag: {exc}",
             ) from exc
         try:
-            if await database.get_active_hook(hook_id) is None:
+            active_hook = await database.get_active_hook(hook_id)
+            if active_hook is None:
+                known_hook = await database.get_hook(hook_id)
+                if known_hook is not None and known_hook.deleted_at is not None:
+                    logger.info("Discarding delivery for deleted hook %s", hook_id)
+                    return Response(
+                        content=json.dumps({"accepted": False, "deleted": True}),
+                        status_code=status.HTTP_202_ACCEPTED,
+                        media_type="application/json",
+                    )
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="unknown or inactive hook",

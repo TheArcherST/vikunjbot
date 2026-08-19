@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from aiogram.exceptions import TelegramBadRequest
@@ -128,7 +129,7 @@ async def test_project_events_are_forwarded_without_a_task_mapping(
     )
     payload = {
         "event_name": "project.updated",
-        "time": "2026-08-18T12:00:00+00:00",
+        "time": datetime.now(UTC).isoformat(),
         "data": {"project": {"id": 5, "title": "Roadmap"}},
     }
     await database.enqueue_event(hook.id, json.dumps(payload).encode(), payload)

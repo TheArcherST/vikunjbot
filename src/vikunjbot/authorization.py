@@ -73,7 +73,11 @@ class DeliveryDestinationAuthorizationService:
     async def owned_hook(self, actor: TelegramActor, hook_id: UUID) -> Hook | None:
         repository = self._ownership_repository()
         hook = await repository.get_hook(hook_id)
-        if hook is None or hook.owner_telegram_user_id != actor.user_id:
+        if (
+            hook is None
+            or hook.deleted_at is not None
+            or hook.owner_telegram_user_id != actor.user_id
+        ):
             return None
         return hook
 

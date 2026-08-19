@@ -100,8 +100,9 @@ def event_payload() -> Callable[..., dict[str, Any]]:
         event_name: str = "task.created",
         task_id: int = 42,
         title: str = "Write tests",
-        event_time: datetime = datetime(2026, 8, 18, 12, 0, tzinfo=UTC),
+        event_time: datetime | None = None,
     ) -> dict[str, Any]:
+        event_time = event_time or datetime.now(UTC)
         return {
             "event_name": event_name,
             "time": event_time.isoformat(),

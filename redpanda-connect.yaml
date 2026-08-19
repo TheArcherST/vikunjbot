@@ -1,0 +1,43 @@
+http:
+  enabled: true
+  address: 0.0.0.0:4195
+  debug_endpoints: false
+
+logger:
+  level: INFO
+  format: json
+
+input:
+  http_server:
+    address: 0.0.0.0:8080
+    path: /events/
+    allowed_verbs:
+      - POST
+    timeout: 10s
+
+buffer:
+  sqlite:
+    path: /data/events.db
+
+pipeline:
+  processors: []
+
+output:
+  retry:
+    max_retries: 0
+    backoff:
+      initial_interval: 1s
+      max_interval: 5m
+      max_elapsed_time: 0s
+    output:
+      http_client:
+        url: 'http://vikunjbot-event-sink:8080${! meta("http_server_request_path") }'
+        verb: POST
+        timeout: 10s
+        retries: 3
+        retry_period: 1s
+        max_retry_backoff: 30s
+        max_in_flight: 1
+        metadata:
+          include_patterns:
+            - '(?i)^(content-type|x-vikunja-.*)$'

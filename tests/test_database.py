@@ -56,6 +56,28 @@ async def test_hook_ownership_scopes_listing_and_settings_updates(database: Data
     assert await database.replace_owned_hook_views(hook.id, 9, ()) is None
 
 
+async def test_only_the_owner_can_soft_delete_a_hook(database: Database) -> None:
+    hook = await database.create_hook(
+        project_id=17,
+        owner_telegram_user_id=5,
+        delivery_destination=DeliveryDestination(chat_id=-100123),
+        allowed_telegram_user_ids=frozenset({5}),
+        views=(HookView(3, "Development"),),
+    )
+
+    assert await database.delete_owned_hook(hook.id, 9) is False
+    assert await database.get_active_hook(hook.id) == hook
+
+    assert await database.delete_owned_hook(hook.id, 5) is True
+    assert await database.delete_owned_hook(hook.id, 5) is False
+    assert await database.get_active_hook(hook.id) is None
+    assert await database.list_hooks_owned_by_telegram_user(5) == ()
+    deleted = await database.get_hook(hook.id)
+    assert deleted is not None
+    assert deleted.active is False
+    assert deleted.deleted_at is not None
+
+
 async def test_event_queue_deduplicates_raw_payloads_and_claims_once(database: Database) -> None:
     hook = await database.create_hook(
         project_id=1,

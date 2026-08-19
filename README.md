@@ -4,10 +4,12 @@
 
 ## Architecture
 
-It's assumed that you host vikunja via Docker, but an be adapted overwise.
+It's assumed that you host Vikunja via Docker, but the component can be adapted otherwise.
 
-- `vikunjbot-event-relay` accepts Vikunja webhooks on the private Docker network and
-  commits them to PostgreSQL before returning `202 Accepted`.
+- `vikunjbot-event-relay` is a Redpanda Connect ingress that commits every webhook to
+  a local SQLite buffer before returning a successful HTTP response.
+- `vikunjbot-event-sink` validates buffered events and commits recognized routes to
+  PostgreSQL. Redpanda Connect retries delivery until the sink accepts it.
 - `vikunjbot` polls that queue, sends or updates the corresponding Telegram task
   message, and accepts replies as Vikunja comments, label changes, or assignments.
 - `vikunjbot-migrate` applies Alembic migrations before the relay and bot start.
@@ -25,6 +27,9 @@ services:
     environment:
       # Required for internal webhook target URLs.
       VIKUNJA_OUTGOINGREQUESTS_ALLOWNONROUTABLEIPS: "true"
+    depends_on:
+      vikunjbot-event-relay:
+        condition: service_healthy
 
   vikunjbot-postgres:
     image: postgres:18.4-trixie@sha256:8ff36f3c66371cba71d20ceedccfc3de9669a68737607888c4ef0af93abe8e39
@@ -63,7 +68,7 @@ services:
       vikunjbot-postgres:
         condition: service_healthy
 
-  vikunjbot-event-relay:
+  vikunjbot-event-sink:
     build: ./vikunjbot
     restart: unless-stopped
     security_opt:
@@ -81,6 +86,39 @@ services:
       vikunjbot-migrate:
         condition: service_completed_successfully
 
+  vikunjbot-event-buffer-init:
+    image: docker.redpanda.com/redpandadata/connect:4.103.1
+    restart: "no"
+    user: "0:0"
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown 10001:10001 /data && chmod 0700 /data"]
+    volumes:
+      - ./vikunjbot-data/event-buffer:/data
+
+  vikunjbot-event-relay:
+    image: docker.redpanda.com/redpandadata/connect:4.103.1
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: ["run", "/connect.yaml"]
+    volumes:
+      - ./vikunjbot/redpanda-connect.yaml:/connect.yaml:ro
+      - ./vikunjbot-data/event-buffer:/data
+    networks:
+      - backend
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4195/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      vikunjbot-event-buffer-init:
+        condition: service_completed_successfully
+
   vikunjbot:
     build: ./vikunjbot
     restart: unless-stopped
@@ -94,21 +132,21 @@ services:
       - backend
     depends_on:
       vikunjbot-event-relay:
-        condition: service_started
+        condition: service_healthy
       vikunjbot-migrate:
         condition: service_completed_successfully
       vikunja:
         condition: service_started
 ```
 
-The example uses `./vikunjbot-data/postgres` as a bind mount, so all bot state — the
-durable queue, encrypted token bindings, hook configuration, and task-message mapping
-— is stored beside the instance compose file. Add `./vikunjbot-data` to the host
-repository's `.gitignore`, restrict its host permissions, and include it in backups.
-This is a separate PostgreSQL database from Vikunja's own database.
+The example stores PostgreSQL under `./vikunjbot-data/postgres` and the ingress SQLite
+buffer under `./vikunjbot-data/event-buffer`. Add `./vikunjbot-data` to the host
+repository's `.gitignore`, restrict its host permissions, and include both directories
+in backups. PostgreSQL remains separate from Vikunja's own database.
 
-The relay deliberately does **not** verify an HMAC, as requested. Do not attach
-`vikunjbot-event-relay` to a public network, publish its port, or add a Traefik route.
+The ingress deliberately does **not** verify an HMAC, as requested. Do not attach
+`vikunjbot-event-relay` or `vikunjbot-event-sink` to a public network, publish their
+ports, or add a Traefik route.
 
 > **Security:** `ALLOWNONROUTABLEIPS` broadens Vikunja's outbound access. In a
 > multi-user instance, prefer a Mole proxy with an ACL limited to the relay.
@@ -177,8 +215,11 @@ token. Use `/views <project-id>` to list the project's Kanban view IDs.
 Use `/hooks` in a private chat to open the inline hook manager. It lists hooks owned 
 by the current Telegram account and allows the owner to enable or disable delivery,
 choose the action-permission window, select Kanban views, and choose which task fields
-are rendered. A hook is owned by the Telegram account that created its route; changing
-a hook always rechecks that ownership in the database.
+are rendered, or permanently retire the hook after an explicit confirmation. Deletion
+keeps existing Telegram messages and audit history, stops the route, and makes a
+best-effort attempt to remove the matching project webhook from Vikunja. A hook is owned
+by the Telegram account that created its route; changing or deleting a hook always
+rechecks that ownership in the database.
 
 For a regular group, add the bot as an administrator so it can post and edit task
 messages. For a **channel with a linked discussion**, add the bot as a channel
@@ -205,9 +246,11 @@ The UUID is only a lookup key. The database holds the hook configuration: projec
 delivery destination (a Telegram chat and optional linked discussion), the Telegram
 users allowed to act, its event TTL, and the Kanban views selected for that delivery
 destination. Unknown or inactive identifiers receive `404`; payloads are not accepted
-for a guessed route.
+by the internal sink. The durable ingress intentionally accepts every request under
+`/events/` first; when the sink rejects a route, Redpanda Connect retains and retries
+the record instead of silently discarding it.
 
-The relay deliberately does not expose a public port and does not verify an HMAC, as
+The ingress deliberately does not expose a public port and does not verify an HMAC, as
 requested. Keep it exclusively on an internal Docker network. The UUID is defense in
 depth, not a replacement for network isolation.
 
@@ -272,12 +315,23 @@ rejected, rather than silently showing stale or ambiguous columns.
 
 ## Reliability model
 
-PostgreSQL is the source of truth for hooks, encrypted token bindings, accepted events,
-and Telegram-message mappings. A relay request is acknowledged only after its event
-row is committed. Identical raw payloads to the same hook are safely deduplicated.
-Workers claim queue rows using PostgreSQL row locks with `SKIP LOCKED`, retain a
-persisted lease, and use an unbounded, capped exponential backoff, so a restart or
-Telegram/Vikunja outage does not lose accepted events.
+SQLite is the first durable boundary for incoming webhooks. Redpanda Connect responds
+successfully only after adding a request to `events.db`, removes it only after the Python
+sink returns success, and retries failures with capped exponential backoff. The
+`vikunjbot-event-relay` DNS name was deliberately retained, so existing webhook URLs
+automatically use this buffer after the stack is recreated.
+
+PostgreSQL remains the source of truth for hooks, encrypted token bindings, validated
+events, and Telegram-message mappings. Identical raw payloads delivered to the same hook
+are safely deduplicated. Workers claim queue rows using PostgreSQL row locks with
+`SKIP LOCKED`, retain a persisted lease, and use an unbounded, capped exponential
+backoff, so a restart or Telegram/Vikunja outage does not lose accepted events.
+
+An invalid or permanently inactive hook is deliberately retried rather than deleted.
+Monitor the Redpanda Connect logs and the size/age of
+`./vikunjbot-data/event-buffer/events.db`; a growing buffer means the sink is rejecting
+or cannot reach downstream storage. If the SQLite volume is unavailable or full, the
+ingress cannot acknowledge new webhooks and Vikunja must retry them.
 
 Delivery to Telegram is inherently at-least-once: no Telegram send API offers an
 idempotency key, so a process crash after Telegram accepted a new message but before

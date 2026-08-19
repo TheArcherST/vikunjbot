@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -148,3 +149,10 @@ async def test_returns_only_hooks_explicitly_owned_by_the_actor() -> None:
     assert await service.owned_hooks(TelegramActor(99)) == ()
     assert await service.owned_hook(ACTOR, owned_hook.id) == owned_hook
     assert await service.owned_hook(TelegramActor(99), owned_hook.id) is None
+
+
+async def test_deleted_hook_is_no_longer_owned_for_management() -> None:
+    deleted_hook = replace(_hook(ACTOR.user_id), deleted_at=NOW)
+    service = DeliveryDestinationAuthorizationService(HookRepository(deleted_hook))
+
+    assert await service.owned_hook(ACTOR, deleted_hook.id) is None

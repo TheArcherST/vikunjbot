@@ -1,7 +1,13 @@
 from uuid import UUID
 
 from vikunjbot.database import DeliveryDestination, Hook, HookView
-from vikunjbot.hook_ui import fields_panel, hook_panel, hooks_list_panel, views_panel
+from vikunjbot.hook_ui import (
+    delete_hook_confirmation_panel,
+    fields_panel,
+    hook_panel,
+    hooks_list_panel,
+    views_panel,
+)
 from vikunjbot.task_fields import ALL_TASK_DISPLAY_FIELDS
 
 
@@ -24,6 +30,7 @@ def test_hook_panels_use_compact_valid_callback_payloads() -> None:
     panels = (
         hooks_list_panel((hook,)),
         hook_panel(hook),
+        delete_hook_confirmation_panel(hook),
         fields_panel(hook),
         views_panel(hook, ((3, "Development"), (8, "Release"))),
     )
@@ -38,3 +45,13 @@ def test_hook_panels_use_compact_valid_callback_payloads() -> None:
 
     assert callback_data
     assert all(value.startswith("hk:") and len(value.encode()) <= 64 for value in callback_data)
+
+
+def test_hook_deletion_requires_an_explicit_confirmation() -> None:
+    text, keyboard = delete_hook_confirmation_panel(_hook())
+
+    assert "cannot be undone" in text
+    assert [button.text for row in keyboard.inline_keyboard for button in row] == [
+        "Delete permanently",
+        "Cancel",
+    ]

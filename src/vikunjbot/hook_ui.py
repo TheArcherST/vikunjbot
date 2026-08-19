@@ -82,7 +82,34 @@ def hook_panel(hook: Hook) -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton(text="🧩 Task fields", callback_data=f"hk:f:{hook.id}"),
             ],
             [InlineKeyboardButton(text="🗂 Kanban views", callback_data=f"hk:w:{hook.id}")],
+            [InlineKeyboardButton(text="🗑 Delete hook", callback_data=f"hk:d:{hook.id}")],
             [InlineKeyboardButton(text="‹ All hooks", callback_data="hk:l:0")],
+        ]
+    )
+    return text, keyboard
+
+
+def delete_hook_confirmation_panel(hook: Hook) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"<b>Delete hook for project {hook.project_id}?</b>\n\n"
+        "New events will no longer be delivered. Existing Telegram messages and event history "
+        "will remain. The bot will also try to remove the matching webhook from Vikunja.\n\n"
+        "This action cannot be undone."
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Delete permanently",
+                    callback_data=f"hk:dx:{hook.id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Cancel",
+                    callback_data=f"hk:v:{hook.id}",
+                )
+            ],
         ]
     )
     return text, keyboard

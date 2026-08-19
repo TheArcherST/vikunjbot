@@ -63,6 +63,7 @@ class Hook:
     task_display_fields: frozenset[TaskDisplayField]
     active: bool
     views: tuple[HookView, ...]
+    deleted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +142,11 @@ class Database:
             record = await session.scalar(
                 select(HookModel)
                 .options(selectinload(HookModel.views))
-                .where(HookModel.id == hook_id, HookModel.active.is_(True))
+                .where(
+                    HookModel.id == hook_id,
+                    HookModel.active.is_(True),
+                    HookModel.deleted_at.is_(None),
+                )
             )
         return _hook(record) if record is not None else None
 
@@ -159,7 +164,10 @@ class Database:
             records = await session.scalars(
                 select(HookModel)
                 .options(selectinload(HookModel.views))
-                .where(HookModel.owner_telegram_user_id == telegram_user_id)
+                .where(
+                    HookModel.owner_telegram_user_id == telegram_user_id,
+                    HookModel.deleted_at.is_(None),
+                )
                 .order_by(HookModel.created_at.desc(), HookModel.id)
             )
             hooks = records.unique().all()
@@ -189,6 +197,7 @@ class Database:
                 .where(
                     HookModel.id == hook_id,
                     HookModel.owner_telegram_user_id == owner_telegram_user_id,
+                    HookModel.deleted_at.is_(None),
                 )
                 .values(**values)
                 .returning(HookModel.id)
@@ -210,6 +219,7 @@ class Database:
                 .where(
                     HookModel.id == hook_id,
                     HookModel.owner_telegram_user_id == owner_telegram_user_id,
+                    HookModel.deleted_at.is_(None),
                 )
                 .with_for_update()
             )
@@ -228,6 +238,23 @@ class Database:
             record.updated_at = utc_now()
             await session.flush()
         return await self.get_hook(hook_id)
+
+    async def delete_owned_hook(self, hook_id: UUID, owner_telegram_user_id: int) -> bool:
+        """Retire an owned hook without deleting its event and message history."""
+
+        now = utc_now()
+        async with self._sessions.begin() as session:
+            deleted_id = await session.scalar(
+                update(HookModel)
+                .where(
+                    HookModel.id == hook_id,
+                    HookModel.owner_telegram_user_id == owner_telegram_user_id,
+                    HookModel.deleted_at.is_(None),
+                )
+                .values(active=False, deleted_at=now, updated_at=now)
+                .returning(HookModel.id)
+            )
+        return deleted_id is not None
 
     async def enqueue_event(
         self, hook_id: UUID, raw_body: bytes, payload: dict[str, Any]
@@ -530,6 +557,7 @@ def _hook(record: HookModel) -> Hook:
             HookView(project_view_id=view.project_view_id, title=view.title)
             for view in record.views
         ),
+        deleted_at=record.deleted_at,
     )
 
 
