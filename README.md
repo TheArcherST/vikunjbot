@@ -288,6 +288,11 @@ message. `/disable_comment_updates` reverses it. Channel routes deliberately omi
 these extra summaries: posting one separately would break Telegram's channel-to-
 discussion relationship; the original channel post is edited instead.
 
+If a task message is deleted directly in Telegram, the next non-terminal task event
+creates a replacement card and moves the persisted task mapping to its new message ID.
+Task deletion or a transition to filtered-out state only revokes the stale mapping and
+does not recreate a card solely to announce that it is gone.
+
 When Vikunja deletes a task, its persistent Telegram message is changed to `🗑 Deleted`
 and becomes non-actionable. A delayed update cannot revive that mapping.
 

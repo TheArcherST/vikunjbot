@@ -211,6 +211,7 @@ class EventWorker:
             logger.info("Ignoring event %s for deleted task %s", event.id, event.task_id)
             return
         text = render_task(task, hook.views, hook.task_display_fields)
+        message_replaced = False
         if existing is None:
             sent = await self._bot.send_message(
                 chat_id=hook.delivery_destination.chat_id,
@@ -230,7 +231,20 @@ class EventWorker:
             except TelegramBadRequest as exc:
                 # Telegram treats an idempotent edit as an error; retaining the
                 # mapping makes retrying a crashed delivery safe in that common case.
-                if "message is not modified" not in str(exc).lower():
+                if _edit_failure_requires_replacement(exc):
+                    sent = await self._bot.send_message(
+                        chat_id=hook.delivery_destination.chat_id,
+                        text=text,
+                    )
+                    message_id = sent.message_id
+                    message_replaced = True
+                    logger.info(
+                        "Replaced missing Telegram message %s with %s for task %s",
+                        existing.message_id,
+                        message_id,
+                        event.task_id,
+                    )
+                elif "message is not modified" not in str(exc).lower():
                     raise
         await self._database.save_task_message(
             hook_id=hook.id,
@@ -243,7 +257,7 @@ class EventWorker:
         )
         should_sync_done_reaction = (
             current_snapshot["done"]
-            if existing is None
+            if existing is None or message_replaced
             else previous_snapshot.get("done") != current_snapshot["done"]
         )
         if should_sync_done_reaction:
@@ -377,6 +391,20 @@ def _deletion_edit_is_terminal(error: TelegramBadRequest) -> bool:
         phrase in message
         for phrase in (
             "message is not modified",
+            "message to edit not found",
+            "message can't be edited",
+            "message_id_invalid",
+        )
+    )
+
+
+def _edit_failure_requires_replacement(error: TelegramBadRequest) -> bool:
+    """Recognize a mapping whose Telegram message can no longer be edited."""
+
+    message = str(error).lower()
+    return any(
+        phrase in message
+        for phrase in (
             "message to edit not found",
             "message can't be edited",
             "message_id_invalid",

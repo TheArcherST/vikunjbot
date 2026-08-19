@@ -51,6 +51,20 @@ class ReactionRejectingBot(FakeBot):
         )
 
 
+class ExternallyDeletedMessageBot(FakeBot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.missing_message_ids: set[int] = set()
+
+    async def edit_message_text(self, *, text: str, chat_id: int, message_id: int) -> None:
+        if message_id in self.missing_message_ids:
+            raise TelegramBadRequest(
+                method=SendMessage(chat_id=chat_id, text="test"),
+                message="message to edit not found",
+            )
+        await super().edit_message_text(text=text, chat_id=chat_id, message_id=message_id)
+
+
 async def test_task_updates_edit_the_original_telegram_message(
     config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
@@ -75,6 +89,65 @@ async def test_task_updates_edit_the_original_telegram_message(
         (12, 101, "<b>DEMO-42: Write more tests</b>\n⬜ Open\n📥 Bucket: Backlog")
     ]
     assert bot.reactions == []
+
+
+async def test_external_message_deletion_recreates_and_rebinds_task_card(
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    hook = await database.create_hook(
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
+    )
+    created = event_payload()
+    updated = event_payload(event_name="task.updated", title="Recreated card")
+    created["data"]["task"]["done"] = True
+    updated["data"]["task"]["done"] = True
+    await database.enqueue_event(hook.id, json.dumps(created).encode(), created)
+    await database.enqueue_event(hook.id, json.dumps(updated).encode(), updated)
+    bot = ExternallyDeletedMessageBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+
+    assert await worker.process_one() is True
+    bot.missing_message_ids.add(101)
+    assert await worker.process_one() is True
+
+    assert bot.sent == [
+        (12, "<b>DEMO-42: Write tests</b>\n✅ Completed\n📥 Bucket: Backlog"),
+        (12, "<b>DEMO-42: Recreated card</b>\n✅ Completed\n📥 Bucket: Backlog"),
+    ]
+    assert bot.reactions == [(12, 101, ["✅"]), (12, 102, ["✅"])]
+    mapping = await database.get_task_message(hook.id, 42)
+    assert mapping is not None
+    assert mapping.message_id == 102
+    assert await database.find_task_message_in_delivery_destination(12, 101) is None
+    assert await database.find_task_message_in_delivery_destination(12, 102) is not None
+
+
+async def test_task_deletion_does_not_resurrect_an_externally_deleted_card(
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    hook = await database.create_hook(
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(),
+    )
+    created = event_payload()
+    deleted = event_payload(event_name="task.deleted")
+    await database.enqueue_event(hook.id, json.dumps(created).encode(), created)
+    await database.enqueue_event(hook.id, json.dumps(deleted).encode(), deleted)
+    bot = ExternallyDeletedMessageBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+
+    assert await worker.process_one() is True
+    bot.missing_message_ids.add(101)
+    assert await worker.process_one() is True
+
+    assert len(bot.sent) == 1
+    mapping = await database.get_task_message(hook.id, 42)
+    assert mapping is not None and mapping.deleted is True
 
 
 async def test_done_state_is_reflected_by_the_bot_reaction(
