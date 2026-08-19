@@ -81,6 +81,15 @@ async def test_migrations_upgrade_an_empty_database_to_head(test_database_url: s
                 )
             ).all()
         )
+        view_kind_column = (
+            await connection.execute(
+                text(
+                    "select data_type, udt_name from information_schema.columns "
+                    "where table_schema = 'public' and table_name = 'hook_views' "
+                    "and column_name = 'view_kind'"
+                )
+            )
+        ).one()._tuple()
         migrated_hook_settings = (
             (
                 await connection.execute(
@@ -118,7 +127,14 @@ async def test_migrations_upgrade_an_empty_database_to_head(test_database_url: s
         "deleted",
     } <= task_message_columns
     assert migrated_destination == (-100111, -100222)
-    assert {"owner_telegram_user_id", "task_display_fields", "deleted_at"} <= hook_columns
+    assert {
+        "owner_telegram_user_id",
+        "task_display_fields",
+        "deleted_at",
+        "filter_by_views",
+    } <= hook_columns
+    assert "filtered_out" in task_message_columns
+    assert view_kind_column == ("USER-DEFINED", "project_view_kind")
     assert migrated_hook_settings[0] == 12
     assert set(migrated_hook_settings[1]) == {
         "identifier",

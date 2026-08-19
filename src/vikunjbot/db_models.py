@@ -8,6 +8,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Enum,
     ForeignKey,
     Identity,
     Index,
@@ -20,6 +21,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON, Uuid
+
+from vikunjbot.project_views import ProjectViewKind
 
 JSONValue = JSON().with_variant(JSONB, "postgresql")
 
@@ -50,6 +53,7 @@ class HookModel(Base):
         Integer, nullable=False, default=86_400
     )
     task_display_fields: Mapped[list[str]] = mapped_column(JSONValue, nullable=False)
+    filter_by_views: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -77,6 +81,14 @@ class HookViewModel(Base):
     )
     project_view_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     title: Mapped[str] = mapped_column(String(250), nullable=False)
+    view_kind: Mapped[ProjectViewKind] = mapped_column(
+        Enum(
+            ProjectViewKind,
+            name="project_view_kind",
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        nullable=False,
+    )
     display_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
     hook: Mapped[HookModel] = relationship(back_populates="views")
@@ -153,6 +165,7 @@ class TaskMessageModel(Base):
     allowed_telegram_user_ids: Mapped[list[int]] = mapped_column(JSONValue, nullable=False)
     snapshot: Mapped[dict[str, object]] = mapped_column(JSONValue, nullable=False)
     deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    filtered_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

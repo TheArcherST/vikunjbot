@@ -61,6 +61,24 @@ class VikunjaClient:
         )
         return _as_object_list_or_list(result, "project views")
 
+    async def task_in_project_view(
+        self, project_id: int, view_id: int, task_id: int
+    ) -> dict[str, Any] | None:
+        """Return the task only when the selected view's own filters include it."""
+
+        result = await self._request(
+            "GET",
+            f"/projects/{project_id}/views/{view_id}/tasks",
+            params={
+                "filter": f"id = {task_id}",
+                "per_page": 100,
+                "expand": "buckets",
+            },
+        )
+        if not isinstance(result, list) and not isinstance(result.get("items"), list):
+            raise VikunjaAPIError(502, "Vikunja returned invalid project view tasks")
+        return _find_task_in_view_response(result, task_id)
+
     async def labels(self, search: str) -> list[dict[str, Any]]:
         result = await self._request("GET", "/labels", params={"q": search, "per_page": 50})
         return _as_object_list(result, "labels")
@@ -148,3 +166,23 @@ def _as_object_list_or_list(value: dict[str, Any] | list[Any], name: str) -> lis
             return value
         raise VikunjaAPIError(502, f"Vikunja returned invalid {name}")
     return _as_object_list(value, name)
+
+
+def _find_task_in_view_response(
+    value: object,
+    task_id: int,
+) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        if value.get("id") == task_id and ("done" in value or "identifier" in value):
+            return value
+        for key in ("items", "tasks"):
+            found = _find_task_in_view_response(value.get(key), task_id)
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, list):
+        for item in value:
+            found = _find_task_in_view_response(item, task_id)
+            if found is not None:
+                return found
+    return None

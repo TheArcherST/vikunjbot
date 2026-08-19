@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
-from vikunjbot.vikunja import VikunjaClient
+from vikunjbot.vikunja import VikunjaAPIError, VikunjaClient
 
 
 async def test_client_keeps_the_api_version_prefix_in_request_urls() -> None:
@@ -88,3 +89,56 @@ async def test_client_lists_and_deletes_project_webhooks() -> None:
         ("DELETE", "/api/v2/projects/4/webhooks/8"),
     ]
     assert requests[0].url.params == httpx.QueryParams({"per_page": "100"})
+
+
+async def test_client_checks_task_membership_in_flat_and_bucketed_views() -> None:
+    responses = [
+        {"items": [{"id": 42, "identifier": "DEMO-42", "done": False}]},
+        {
+            "items": [
+                {
+                    "id": 7,
+                    "title": "Backlog",
+                    "tasks": [{"id": 42, "identifier": "DEMO-42", "done": False}],
+                }
+            ]
+        },
+        {"items": []},
+    ]
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=responses.pop(0))
+
+    client = VikunjaClient(
+        "http://vikunja:3456/api/v2",
+        "service-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert await client.task_in_project_view(4, 10, 42) is not None
+    assert await client.task_in_project_view(4, 11, 42) is not None
+    assert await client.task_in_project_view(4, 12, 42) is None
+    assert all(request.url.params["filter"] == "id = 42" for request in requests)
+    assert [request.url.path for request in requests] == [
+        "/api/v2/projects/4/views/10/tasks",
+        "/api/v2/projects/4/views/11/tasks",
+        "/api/v2/projects/4/views/12/tasks",
+    ]
+
+
+async def test_malformed_view_response_is_not_treated_as_confirmed_absence() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": []})
+
+    client = VikunjaClient(
+        "http://vikunja:3456/api/v2",
+        "service-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(VikunjaAPIError) as captured:
+        await client.task_in_project_view(4, 10, 42)
+
+    assert captured.value.status_code == 502

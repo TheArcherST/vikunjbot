@@ -9,11 +9,12 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import ReactionTypeEmoji, ReplyParameters
 
-from vikunjbot.database import Database, Hook, StoredEvent
+from vikunjbot.database import Database, Hook, HookView, StoredEvent
 from vikunjbot.settings import Settings
 from vikunjbot.task_text import (
     change_summary,
     render_deleted_task,
+    render_filtered_task,
     render_project_event,
     render_task,
     task_snapshot,
@@ -64,6 +65,37 @@ class EventEnricher:
             logger.warning("Could not read task %s with the service account", event.task_id)
             return None
 
+    async def task_visible_in_views(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        views: tuple[HookView, ...],
+    ) -> dict[str, Any] | None:
+        """Apply Vikunja's actual view filters; API failures deliberately propagate for retry."""
+
+        if self._client is None:
+            raise RuntimeError("VIKUNJBOT_SERVICE_TOKEN is required for view delivery filtering")
+        results = await asyncio.gather(
+            *(
+                self._client.task_in_project_view(project_id, view.project_view_id, task_id)
+                for view in views
+            ),
+            return_exceptions=True,
+        )
+        cancellations = [
+            result for result in results if isinstance(result, asyncio.CancelledError)
+        ]
+        if cancellations:
+            raise cancellations[0]
+        matching = [task for task in results if isinstance(task, dict)]
+        if matching:
+            return _merge_view_tasks(matching, views)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise failures[0]
+        return None
+
 
 class EventWorker:
     def __init__(self, bot: Bot, database: Database, config: Settings) -> None:
@@ -112,7 +144,19 @@ class EventWorker:
         if expires_at <= utc_now():
             logger.info("Ignoring expired event %s", event.id)
             return
-        task = await self._enricher.task(event, hook)
+        if hook.filter_by_views and event.task_id is not None:
+            if not hook.views:
+                raise RuntimeError("view delivery filtering requires at least one selected view")
+            task = await self._enricher.task_visible_in_views(
+                project_id=hook.project_id,
+                task_id=event.task_id,
+                views=hook.views,
+            )
+            if task is None:
+                await self._deliver_task_filtered_out(event, hook)
+                return
+        else:
+            task = await self._enricher.task(event, hook)
         if task is None or event.task_id is None:
             if event.event_name.startswith("project."):
                 await self._deliver_project_event(event, hook)
@@ -120,6 +164,39 @@ class EventWorker:
             logger.info("Ignoring non-task event %s (%s)", event.id, event.event_name)
             return
         await self._deliver_task(event, task, hook, expires_at)
+
+    async def _deliver_task_filtered_out(self, event: StoredEvent, hook: Hook) -> None:
+        task_id = event.task_id
+        if task_id is None:  # pragma: no cover - task view filtering only runs for task events
+            return
+        existing = await self._database.get_task_message(hook.id, task_id)
+        if existing is None or existing.deleted or existing.filtered_out:
+            logger.info(
+                "Ignoring event %s because task %s is outside the hook views",
+                event.id,
+                task_id,
+            )
+            return
+        try:
+            await self._bot.edit_message_text(
+                text=render_filtered_task(
+                    existing.snapshot,
+                    hook.views,
+                    hook.task_display_fields,
+                ),
+                chat_id=hook.delivery_destination.chat_id,
+                message_id=existing.message_id,
+            )
+        except TelegramBadRequest as exc:
+            if not _deletion_edit_is_terminal(exc):
+                raise
+        if existing.snapshot.get("done"):
+            await self._sync_done_reaction(
+                chat_id=hook.delivery_destination.chat_id,
+                message_id=existing.message_id,
+                is_done=False,
+            )
+        await self._database.mark_task_message_filtered_out(hook.id, task_id)
 
     async def _deliver_project_event(self, event: StoredEvent, hook: Hook) -> None:
         text = render_project_event(event.event_name, event.payload)
@@ -260,6 +337,31 @@ def _merge_event_bucket(
     event_buckets = event_task.get("buckets")
     if isinstance(event_buckets, (list, dict)) and event_buckets:
         merged["buckets"] = event_buckets
+    return merged
+
+
+def _merge_view_tasks(
+    matching_tasks: list[dict[str, Any]],
+    selected_views: tuple[HookView, ...],
+) -> dict[str, Any]:
+    """Combine per-view responses while retaining buckets only from matching selected views."""
+
+    merged = dict(matching_tasks[0])
+    selected_ids = {view.project_view_id for view in selected_views}
+    buckets: list[dict[str, Any]] = []
+    seen: set[tuple[object, object]] = set()
+    for task in matching_tasks:
+        raw_buckets = task.get("buckets")
+        if not isinstance(raw_buckets, list):
+            continue
+        for bucket in raw_buckets:
+            if not isinstance(bucket, dict) or bucket.get("project_view_id") not in selected_ids:
+                continue
+            identity = (bucket.get("project_view_id"), bucket.get("id"))
+            if identity not in seen:
+                seen.add(identity)
+                buckets.append(bucket)
+    merged["buckets"] = buckets
     return merged
 
 

@@ -23,6 +23,7 @@ from vikunjbot.db_models import (
     TaskMessageModel,
     TokenBindingModel,
 )
+from vikunjbot.project_views import ProjectViewKind
 from vikunjbot.task_fields import ALL_TASK_DISPLAY_FIELDS, TaskDisplayField
 from vikunjbot.timeutils import exponential_backoff, parse_event_time, utc_now
 
@@ -42,6 +43,7 @@ class StoredEvent:
 class HookView:
     project_view_id: int
     title: str
+    view_kind: ProjectViewKind = ProjectViewKind.KANBAN
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +65,7 @@ class Hook:
     task_display_fields: frozenset[TaskDisplayField]
     active: bool
     views: tuple[HookView, ...]
+    filter_by_views: bool = False
     deleted_at: datetime | None = None
 
 
@@ -76,6 +79,7 @@ class TaskMessage:
     allowed_telegram_user_ids: frozenset[int]
     snapshot: dict[str, Any]
     deleted: bool
+    filtered_out: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +115,7 @@ class Database:
         allowed_telegram_user_ids: frozenset[int],
         views: tuple[HookView, ...],
         event_permission_ttl_seconds: int = 86_400,
+        filter_by_views: bool = False,
     ) -> Hook:
         now = utc_now()
         record = HookModel(
@@ -121,12 +126,14 @@ class Database:
             allowed_telegram_user_ids=sorted(allowed_telegram_user_ids),
             event_permission_ttl_seconds=event_permission_ttl_seconds,
             task_display_fields=[field.value for field in sorted(ALL_TASK_DISPLAY_FIELDS)],
+            filter_by_views=filter_by_views,
             created_at=now,
             updated_at=now,
             views=[
                 HookViewModel(
                     project_view_id=view.project_view_id,
                     title=view.title,
+                    view_kind=view.view_kind,
                     display_order=index,
                 )
                 for index, view in enumerate(views)
@@ -181,6 +188,7 @@ class Database:
         active: bool | None = None,
         event_permission_ttl_seconds: int | None = None,
         task_display_fields: frozenset[TaskDisplayField] | None = None,
+        filter_by_views: bool | None = None,
     ) -> Hook | None:
         values: dict[str, object] = {"updated_at": utc_now()}
         if active is not None:
@@ -191,6 +199,8 @@ class Database:
             values["event_permission_ttl_seconds"] = event_permission_ttl_seconds
         if task_display_fields is not None:
             values["task_display_fields"] = [field.value for field in sorted(task_display_fields)]
+        if filter_by_views is not None:
+            values["filter_by_views"] = filter_by_views
         async with self._sessions.begin() as session:
             updated_id = await session.scalar(
                 update(HookModel)
@@ -231,6 +241,7 @@ class Database:
                 HookViewModel(
                     project_view_id=view.project_view_id,
                     title=view.title,
+                    view_kind=view.view_kind,
                     display_order=index,
                 )
                 for index, view in enumerate(views)
@@ -435,7 +446,12 @@ class Database:
             record = await session.scalar(
                 select(TaskMessageModel)
                 .join(HookModel, TaskMessageModel.hook_id == HookModel.id)
-                .where(*criteria, HookModel.active.is_(True), TaskMessageModel.deleted.is_(False))
+                .where(
+                    *criteria,
+                    HookModel.active.is_(True),
+                    TaskMessageModel.deleted.is_(False),
+                    TaskMessageModel.filtered_out.is_(False),
+                )
             )
         return _task_message(record) if record is not None else None
 
@@ -461,6 +477,7 @@ class Database:
             "allowed_telegram_user_ids": sorted(allowed_telegram_user_ids),
             "snapshot": snapshot,
             "deleted": False,
+            "filtered_out": False,
             "updated_at": now,
         }
         updates = {
@@ -470,6 +487,7 @@ class Database:
             "expires_at": expires_at,
             "allowed_telegram_user_ids": sorted(allowed_telegram_user_ids),
             "snapshot": snapshot,
+            "filtered_out": False,
             "updated_at": now,
         }
         statement = (
@@ -492,6 +510,18 @@ class Database:
                 update(TaskMessageModel)
                 .where(TaskMessageModel.hook_id == hook_id, TaskMessageModel.task_id == task_id)
                 .values(deleted=True, updated_at=utc_now())
+            )
+
+    async def mark_task_message_filtered_out(self, hook_id: UUID, task_id: int) -> None:
+        async with self._sessions.begin() as session:
+            await session.execute(
+                update(TaskMessageModel)
+                .where(
+                    TaskMessageModel.hook_id == hook_id,
+                    TaskMessageModel.task_id == task_id,
+                    TaskMessageModel.deleted.is_(False),
+                )
+                .values(filtered_out=True, updated_at=utc_now())
             )
 
     async def comment_updates_enabled(self, chat_id: int) -> bool:
@@ -554,9 +584,14 @@ def _hook(record: HookModel) -> Hook:
         ),
         active=record.active,
         views=tuple(
-            HookView(project_view_id=view.project_view_id, title=view.title)
+            HookView(
+                project_view_id=view.project_view_id,
+                title=view.title,
+                view_kind=ProjectViewKind(view.view_kind),
+            )
             for view in record.views
         ),
+        filter_by_views=record.filter_by_views,
         deleted_at=record.deleted_at,
     )
 
@@ -574,4 +609,5 @@ def _task_message(record: TaskMessageModel) -> TaskMessage:
         allowed_telegram_user_ids=frozenset(record.allowed_telegram_user_ids),
         snapshot=dict(record.snapshot),
         deleted=record.deleted,
+        filtered_out=record.filtered_out,
     )

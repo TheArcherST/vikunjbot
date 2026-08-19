@@ -28,6 +28,19 @@ def render_task(
     display_fields: frozenset[TaskDisplayField] = ALL_TASK_DISPLAY_FIELDS,
 ) -> str:
     snapshot = task_snapshot(task, views)
+    return _render_task_snapshot(
+        snapshot,
+        prefer_view_buckets=bool(views),
+        display_fields=display_fields,
+    )
+
+
+def _render_task_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    prefer_view_buckets: bool,
+    display_fields: frozenset[TaskDisplayField],
+) -> str:
     heading = _task_heading(
         snapshot,
         show_identifier=TaskDisplayField.IDENTIFIER in display_fields,
@@ -35,7 +48,7 @@ def render_task(
     lines = [heading]
     if TaskDisplayField.STATUS in display_fields:
         lines.append("✅ Completed" if snapshot["done"] else "⬜ Open")
-    if views and TaskDisplayField.BUCKET in display_fields:
+    if prefer_view_buckets and TaskDisplayField.BUCKET in display_fields:
         for view_title, bucket_title in snapshot["view_buckets"]:
             lines.append(f"📥 {html.escape(view_title)}: {html.escape(bucket_title)}")
     elif snapshot["bucket"] and TaskDisplayField.BUCKET in display_fields:
@@ -60,6 +73,24 @@ def render_deleted_task(
         show_identifier=TaskDisplayField.IDENTIFIER in display_fields,
     )
     return f"{heading}\n🗑 Deleted"
+
+
+def render_filtered_task(
+    task: dict[str, Any],
+    views: tuple[HookView, ...] = (),
+    display_fields: frozenset[TaskDisplayField] = ALL_TASK_DISPLAY_FIELDS,
+) -> str:
+    """Render a reversible, non-actionable state for a task outside delivery views."""
+
+    rendered = _render_task_snapshot(
+        task_snapshot(task, views),
+        prefer_view_buckets=bool(views),
+        display_fields=display_fields,
+    )
+    return (
+        f"<s>{rendered}</s>\n"
+        "<i>This task is no longer visible in the selected delivery views.</i>"
+    )
 
 
 def render_project_event(event_name: str, payload: dict[str, Any]) -> str:
@@ -118,6 +149,8 @@ def change_summary(
 
 def _bucket_name(task: dict[str, Any]) -> str:
     bucket = task.get("bucket")
+    if isinstance(bucket, str):
+        return _text(bucket)
     if isinstance(bucket, dict):
         for key in ("title", "name"):
             value = _text(bucket.get(key))
@@ -143,6 +176,18 @@ def _buckets(value: object) -> list[dict[str, Any]]:
 
 
 def _view_buckets(task: dict[str, Any], views: tuple[HookView, ...]) -> list[tuple[str, str]]:
+    stored = task.get("view_buckets")
+    if isinstance(stored, list):
+        return [
+            (item[0].strip(), item[1].strip())
+            for item in stored
+            if isinstance(item, (list, tuple))
+            and len(item) == 2
+            and isinstance(item[0], str)
+            and isinstance(item[1], str)
+            and item[0].strip()
+            and item[1].strip()
+        ]
     if not views:
         return []
     buckets_by_view = {
@@ -161,6 +206,9 @@ def _names(value: object, *, title_key: str) -> list[str]:
         return []
     names = []
     for item in value:
+        if isinstance(item, str) and item.strip():
+            names.append(item.strip())
+            continue
         if isinstance(item, dict):
             candidate = _text(item.get(title_key) or item.get("name") or item.get("username"))
             if candidate:

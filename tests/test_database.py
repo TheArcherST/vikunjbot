@@ -4,15 +4,22 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from vikunjbot.database import Database, DeliveryDestination, HookView
+from vikunjbot.project_views import ProjectViewKind
 from vikunjbot.task_fields import TaskDisplayField
 
 
-async def test_hook_configuration_persists_its_selected_kanban_views(database: Database) -> None:
+async def test_hook_configuration_persists_selected_views_and_delivery_filter(
+    database: Database,
+) -> None:
     hook = await database.create_hook(
         project_id=17,
         delivery_destination=DeliveryDestination(chat_id=-100123, discussion_chat_id=-100456),
         allowed_telegram_user_ids=frozenset({5, 9}),
-        views=(HookView(3, "Development"), HookView(8, "Release")),
+        views=(
+            HookView(3, "Development", ProjectViewKind.KANBAN),
+            HookView(8, "Release", ProjectViewKind.TABLE),
+        ),
+        filter_by_views=True,
     )
 
     stored = await database.get_active_hook(hook.id)
@@ -39,12 +46,14 @@ async def test_hook_ownership_scopes_listing_and_settings_updates(database: Data
         active=False,
         event_permission_ttl_seconds=3_600,
         task_display_fields=frozenset({TaskDisplayField.STATUS}),
+        filter_by_views=True,
     )
 
     assert updated is not None
     assert updated.active is False
     assert updated.event_permission_ttl_seconds == 3_600
     assert updated.task_display_fields == frozenset({TaskDisplayField.STATUS})
+    assert updated.filter_by_views is True
 
     updated_views = await database.replace_owned_hook_views(
         hook.id,

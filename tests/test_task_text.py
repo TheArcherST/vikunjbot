@@ -3,7 +3,12 @@ from __future__ import annotations
 from vikunjbot.database import HookView
 from vikunjbot.event_worker import _merge_event_bucket, _needs_bucket_enrichment
 from vikunjbot.task_fields import TaskDisplayField
-from vikunjbot.task_text import render_deleted_task, render_task, task_snapshot
+from vikunjbot.task_text import (
+    render_deleted_task,
+    render_filtered_task,
+    render_task,
+    task_snapshot,
+)
 
 
 def test_zero_due_date_is_not_rendered_as_a_deadline() -> None:
@@ -128,3 +133,40 @@ def test_deleted_task_is_rendered_as_a_terminal_notice() -> None:
     assert render_deleted_task({"identifier": "DEMO-42", "title": "Gone"}) == (
         "<b>DEMO-42: Gone</b>\n🗑 Deleted"
     )
+
+
+def test_filtered_task_strikes_every_displayed_field_and_escapes_vikunja_data() -> None:
+    task = {
+        "identifier": "<DEMO&42>",
+        "title": "Close </s><b>escape",
+        "done": False,
+        "bucket": "R&D <review>",
+        "labels": ["<urgent>"],
+        "assignees": ["alice&bob"],
+    }
+
+    rendered = render_filtered_task(task)
+
+    assert rendered.startswith("<s><b>&lt;DEMO&amp;42&gt;: Close &lt;/s&gt;&lt;b&gt;escape</b>")
+    assert "📥 Bucket: R&amp;D &lt;review&gt;" in rendered
+    assert "🏷 &lt;urgent&gt;" in rendered
+    assert "👤 alice&amp;bob" in rendered
+    assert rendered.endswith(
+        "</s>\n<i>This task is no longer visible in the selected delivery views.</i>"
+    )
+    assert "</s><b>escape" not in rendered
+
+
+def test_task_snapshot_is_idempotent_for_terminal_rendering() -> None:
+    snapshot = {
+        "title": "Stored",
+        "identifier": "DEMO-42",
+        "done": True,
+        "due_date": "2026-08-19T12:30:00+00:00",
+        "bucket": "Done",
+        "view_buckets": [("Board", "Done")],
+        "labels": ["important"],
+        "assignees": ["alex"],
+    }
+
+    assert task_snapshot(snapshot) == snapshot

@@ -27,7 +27,12 @@ from vikunjbot.authorization import (
     TelegramActor,
     task_action_grants,
 )
-from vikunjbot.database import Database, DeliveryDestination, HookView, TaskMessage
+from vikunjbot.database import (
+    Database,
+    DeliveryDestination,
+    HookView,
+    TaskMessage,
+)
 from vikunjbot.event_worker import EventWorker
 from vikunjbot.hook_ui import (
     delete_hook_confirmation_panel,
@@ -38,8 +43,13 @@ from vikunjbot.hook_ui import (
     ttl_panel,
     views_panel,
 )
+from vikunjbot.project_views import ProjectViewKind
 from vikunjbot.settings import Settings, settings
-from vikunjbot.task_actions import apply_task_actions, parse_task_actions
+from vikunjbot.task_actions import (
+    PartialTaskActionError,
+    apply_task_actions,
+    parse_task_actions,
+)
 from vikunjbot.task_fields import TaskDisplayField
 from vikunjbot.tokens import (
     TelegramInteraction,
@@ -50,8 +60,6 @@ from vikunjbot.tokens import (
 )
 from vikunjbot.vikunja import VikunjaAPIError, VikunjaClient
 
-logger = logging.getLogger(__name__)
-
 
 def _command_syntax(value: str) -> str:
     """Render command syntax safely when the bot's default parse mode is HTML."""
@@ -59,10 +67,10 @@ def _command_syntax(value: str) -> str:
 
 
 _LOGIN_COMMAND = _command_syntax("/login <API token>")
-_WEBHOOK_COMMAND = _command_syntax("/webhook <project-id> [kanban-view-ids]")
-_INSTALL_WEBHOOK_COMMAND = _command_syntax("/install_webhook <project-id> [kanban-view-ids]")
+_WEBHOOK_COMMAND = _command_syntax("/webhook <project-id> [view-ids]")
+_INSTALL_WEBHOOK_COMMAND = _command_syntax("/install_webhook <project-id> [view-ids]")
 _INSTALL_CHANNEL_WEBHOOK_COMMAND = _command_syntax(
-    "/install_channel_webhook <project-id> [kanban-view-ids]"
+    "/install_channel_webhook <project-id> [view-ids]"
 )
 _VIEWS_COMMAND = _command_syntax("/views <project-id>")
 
@@ -112,7 +120,8 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             "remaining text becomes a comment.\n\n"
             f"Use {_VIEWS_COMMAND} to list a project's Kanban views. Then use "
             f"{_WEBHOOK_COMMAND} to get a webhook URL, or {_INSTALL_WEBHOOK_COMMAND} "
-            "to create it through your bound account. Use /hooks to manage your routes. "
+            "to create it through your bound account. Selected project views can also filter "
+            "delivery through /hooks. Use /hooks to manage your routes. "
             "To publish into a channel and its linked "
             "discussion, forward a channel post here and reply with\n"
             f"{_INSTALL_CHANNEL_WEBHOOK_COMMAND}."
@@ -195,16 +204,16 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
         except VikunjaAPIError as exc:
             await message.answer(_api_error_message(exc))
             return
-        kanban = [view for view in project_views if view.get("view_kind") == "kanban"]
-        if not kanban:
-            await message.answer("This project has no Kanban views.")
+        available = _project_views(project_views)
+        if not available:
+            await message.answer("This project has no supported views.")
             return
-        lines = ["Kanban views:"]
-        for view in kanban:
-            view_id = view.get("id")
-            title = view.get("title")
-            if isinstance(view_id, int) and isinstance(title, str):
-                lines.append(f"• <code>{view_id}</code> — {html.escape(title)}")
+        lines = ["Project views:"]
+        for view in available:
+            lines.append(
+                f"• <code>{view.project_view_id}</code> — "
+                f"{html.escape(view.title)} ({view.view_kind.value})"
+            )
         await message.answer("\n".join(lines))
 
     @router.message(Command("install_webhook"))
@@ -220,7 +229,7 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             client = await token_service.client_for_telegram_action(
                 TelegramInteraction(message.from_user.id)
             )
-            webhook_url = await _create_hook_target(
+            await _install_project_webhook(
                 database=database,
                 config=config,
                 client=client,
@@ -229,7 +238,6 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
                 delivery_destination=DeliveryDestination(chat_id=message.chat.id),
                 view_ids=view_ids,
             )
-            await client.create_project_webhook(project_id, webhook_url, _TASK_EVENTS)
         except (HookConfigurationError, TokenBindingError, TokenIdentityChangedError) as exc:
             await message.answer(html.escape(str(exc)))
             return
@@ -262,7 +270,7 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             client = await token_service.client_for_telegram_action(
                 TelegramInteraction(message.from_user.id)
             )
-            webhook_url = await _create_hook_target(
+            await _install_project_webhook(
                 database=database,
                 config=config,
                 client=client,
@@ -271,7 +279,6 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
                 delivery_destination=destination,
                 view_ids=view_ids,
             )
-            await client.create_project_webhook(project_id, webhook_url, _TASK_EVENTS)
         except (
             ChannelBindingError,
             HookConfigurationError,
@@ -372,27 +379,55 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
                 client = await token_service.client_for_telegram_action(
                     TelegramInteraction(actor.user_id)
                 )
-                available = await _available_kanban_views(client, hook.project_id)
-                panel = views_panel(
-                    hook,
-                    tuple((view.project_view_id, view.title) for view in available),
+                available = await _available_project_views(client, hook.project_id)
+                panel = views_panel(hook, available)
+            elif len(parts) == 3 and parts[1] == "wf":
+                client = await token_service.client_for_telegram_action(
+                    TelegramInteraction(actor.user_id)
+                )
+                available = await _available_project_views(client, hook.project_id)
+                if not hook.filter_by_views:
+                    if not hook.views:
+                        raise HookConfigurationError(
+                            "Select at least one project view before enabling delivery filtering"
+                        )
+                    if not config.vikunjbot_service_token:
+                        raise HookConfigurationError(
+                            "VIKUNJBOT_SERVICE_TOKEN is required to filter delivery by views"
+                        )
+                updated = await database.update_owned_hook(
+                    hook.id,
+                    actor.user_id,
+                    filter_by_views=not hook.filter_by_views,
+                )
+                if updated is None:  # pragma: no cover - protected by ownership check above
+                    raise RuntimeError("hook ownership changed during update")
+                panel = views_panel(updated, available)
+                notice = (
+                    "View delivery filter enabled."
+                    if updated.filter_by_views
+                    else "View delivery filter disabled."
                 )
             elif len(parts) == 4 and parts[1] == "wt":
                 client = await token_service.client_for_telegram_action(
                     TelegramInteraction(actor.user_id)
                 )
-                available = await _available_kanban_views(client, hook.project_id)
+                available = await _available_project_views(client, hook.project_id)
                 available_by_id = {view.project_view_id: view for view in available}
                 toggled_id = int(parts[3])
                 if toggled_id not in available_by_id:
-                    raise ValueError("Kanban view no longer exists")
+                    raise ValueError("project view no longer exists")
                 selected_ids = {view.project_view_id for view in hook.views}
                 if toggled_id in selected_ids:
+                    if hook.filter_by_views and len(selected_ids) == 1:
+                        raise HookConfigurationError(
+                            "Disable delivery filtering before removing its last selected view"
+                        )
                     selected_ids.remove(toggled_id)
                 else:
                     if not config.vikunjbot_service_token:
                         raise HookConfigurationError(
-                            "VIKUNJBOT_SERVICE_TOKEN is required to display Kanban views"
+                            "VIKUNJBOT_SERVICE_TOKEN is required to use project views"
                         )
                     selected_ids.add(toggled_id)
                 selected_views = tuple(
@@ -405,44 +440,24 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
                 )
                 if updated is None:  # pragma: no cover - protected by ownership check above
                     raise RuntimeError("hook ownership changed during update")
-                panel = views_panel(
-                    updated,
-                    tuple((view.project_view_id, view.title) for view in available),
-                )
+                panel = views_panel(updated, available)
             elif len(parts) == 3 and parts[1] == "d":
                 panel = delete_hook_confirmation_panel(hook)
             elif len(parts) == 3 and parts[1] == "dx":
-                cleanup_failed = False
-                try:
-                    client = await token_service.client_for_telegram_action(
-                        TelegramInteraction(actor.user_id)
-                    )
-                    await _delete_matching_project_webhooks(
-                        client,
-                        hook.project_id,
-                        _hook_target_url(config, hook.id),
-                    )
-                except (
-                    TokenBindingError,
-                    TokenIdentityChangedError,
-                    VikunjaAPIError,
-                ) as exc:
-                    cleanup_failed = True
-                    logger.warning(
-                        "Could not remove Vikunja webhook for deleted hook %s: %s",
-                        hook.id,
-                        exc,
-                    )
-                deleted = await database.delete_owned_hook(hook.id, actor.user_id)
-                if not deleted:  # pragma: no cover - protected by ownership check above
-                    raise RuntimeError("hook ownership changed during deletion")
+                client = await token_service.client_for_telegram_action(
+                    TelegramInteraction(actor.user_id)
+                )
+                await _delete_owned_hook_everywhere(
+                    database=database,
+                    client=client,
+                    project_id=hook.project_id,
+                    target_url=_hook_target_url(config, hook.id),
+                    hook_id=hook.id,
+                    owner_telegram_user_id=actor.user_id,
+                )
                 owned = await authorization_service.owned_hooks(actor)
                 panel = hooks_list_panel(owned)
-                notice = (
-                    "Hook deleted locally. Remove its webhook from Vikunja manually."
-                    if cleanup_failed
-                    else "Hook deleted."
-                )
+                notice = "Hook deleted."
             else:
                 raise ValueError("unknown hook panel action")
         except (HookConfigurationError, TokenBindingError, TokenIdentityChangedError) as exc:
@@ -494,6 +509,13 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             completed = await apply_task_actions(client, linked.task_id, actions)
         except (TokenBindingError, TokenIdentityChangedError) as exc:
             await message.reply(html.escape(str(exc)))
+            return
+        except PartialTaskActionError as exc:
+            confirmed = ", ".join(html.escape(item) for item in exc.completed)
+            await message.reply(
+                "Partially completed before Vikunja failed: "
+                f"{confirmed}. Check the task before retrying. " + _api_error_message(exc)
+            )
             return
         except VikunjaAPIError as exc:
             await message.reply(_api_error_message(exc))
@@ -617,10 +639,10 @@ async def _create_hook_target(
     delivery_destination: DeliveryDestination,
     view_ids: tuple[int, ...],
 ) -> str:
-    views = await _selected_kanban_views(client, project_id, view_ids)
+    views = await _selected_project_views(client, project_id, view_ids)
     if views and not config.vikunjbot_service_token:
         raise HookConfigurationError(
-            "VIKUNJBOT_SERVICE_TOKEN is required when a hook displays configured Kanban views"
+            "VIKUNJBOT_SERVICE_TOKEN is required when a hook uses configured project views"
         )
     hook = await database.create_hook(
         project_id=project_id,
@@ -630,6 +652,51 @@ async def _create_hook_target(
         views=views,
     )
     return _hook_target_url(config, hook.id)
+
+
+async def _install_project_webhook(
+    *,
+    database: Database,
+    config: Settings,
+    client: VikunjaClient,
+    project_id: int,
+    telegram_user_id: int,
+    delivery_destination: DeliveryDestination,
+    view_ids: tuple[int, ...],
+) -> str:
+    """Install both halves, reconciling an ambiguous Vikunja response before reporting failure."""
+
+    target_url = await _create_hook_target(
+        database=database,
+        config=config,
+        client=client,
+        project_id=project_id,
+        telegram_user_id=telegram_user_id,
+        delivery_destination=delivery_destination,
+        view_ids=view_ids,
+    )
+    hook_id = UUID(target_url.rstrip("/").rsplit("/", 1)[-1])
+    try:
+        await client.create_project_webhook(project_id, target_url, _TASK_EVENTS)
+    except VikunjaAPIError as install_error:
+        try:
+            installed = await _matching_project_webhook_ids(client, project_id, target_url)
+        except VikunjaAPIError as reconciliation_error:
+            raise HookConfigurationError(
+                "Vikunja did not confirm whether it created the webhook. The local route was "
+                "kept so an accepted event cannot disappear; open /hooks and delete it after "
+                "Vikunja is available again."
+            ) from reconciliation_error
+        if installed:
+            return target_url
+        deleted = await database.delete_owned_hook(hook_id, telegram_user_id)
+        if not deleted:
+            raise HookConfigurationError(
+                "Vikunja did not create the webhook, and the local route could not be rolled back. "
+                "Open /hooks and remove it manually."
+            ) from install_error
+        raise install_error
+    return target_url
 
 
 def _hook_target_url(config: Settings, hook_id: UUID) -> str:
@@ -643,54 +710,99 @@ async def _delete_matching_project_webhooks(
 ) -> int:
     """Remove every Vikunja webhook that targets this owned route."""
 
+    matching_ids = await _matching_project_webhook_ids(client, project_id, target_url)
+    for webhook_id in sorted(matching_ids):
+        await client.delete_project_webhook(project_id, webhook_id)
+    remaining_ids = await _matching_project_webhook_ids(client, project_id, target_url)
+    if remaining_ids:
+        raise VikunjaAPIError(
+            409,
+            "Vikunja still reports the webhook after deletion; the local route was kept",
+        )
+    return len(matching_ids)
+
+
+async def _delete_owned_hook_everywhere(
+    *,
+    database: Database,
+    client: VikunjaClient,
+    project_id: int,
+    target_url: str,
+    hook_id: UUID,
+    owner_telegram_user_id: int,
+) -> int:
+    """Confirm remote cleanup before retiring the local route."""
+
+    removed = await _delete_matching_project_webhooks(client, project_id, target_url)
+    deleted = await database.delete_owned_hook(hook_id, owner_telegram_user_id)
+    if not deleted:
+        raise RuntimeError("hook ownership changed during deletion")
+    return removed
+
+
+async def _matching_project_webhook_ids(
+    client: VikunjaClient,
+    project_id: int,
+    target_url: str,
+) -> set[int]:
     expected = target_url.rstrip("/")
-    matching_ids = {
+    return {
         webhook_id
         for webhook in await client.project_webhooks(project_id)
         if str(webhook.get("target_url", "")).rstrip("/") == expected
         and isinstance((webhook_id := webhook.get("id")), int)
         and webhook_id > 0
     }
-    for webhook_id in sorted(matching_ids):
-        await client.delete_project_webhook(project_id, webhook_id)
-    return len(matching_ids)
 
 
-async def _selected_kanban_views(
+async def _selected_project_views(
     client: VikunjaClient, project_id: int, view_ids: tuple[int, ...]
 ) -> tuple[HookView, ...]:
     if not view_ids:
         return ()
     available = {
-        view.project_view_id: view for view in await _available_kanban_views(client, project_id)
+        view.project_view_id: view for view in await _available_project_views(client, project_id)
     }
     selected: list[HookView] = []
     for view_id in view_ids:
         view = available.get(view_id)
         if view is None:
             raise HookConfigurationError(
-                f"Kanban view {view_id} does not exist in project {project_id}; "
+                f"Project view {view_id} does not exist in project {project_id}; "
                 f"use {_VIEWS_COMMAND} to list available views"
             )
         selected.append(view)
     return tuple(selected)
 
 
-async def _available_kanban_views(
-    client: VikunjaClient, project_id: int
-) -> tuple[HookView, ...]:
+async def _available_project_views(client: VikunjaClient, project_id: int) -> tuple[HookView, ...]:
+    return _project_views(await client.project_views(project_id))
+
+
+def _project_views(raw_views: list[dict[str, object]]) -> tuple[HookView, ...]:
     available: list[HookView] = []
-    for view in await client.project_views(project_id):
+    for view in raw_views:
         view_id = view.get("id")
         title = view.get("title")
+        raw_kind = view.get("view_kind")
+        try:
+            view_kind = ProjectViewKind(raw_kind) if isinstance(raw_kind, str) else None
+        except ValueError:
+            view_kind = None
         if (
             isinstance(view_id, int)
             and view_id > 0
-            and view.get("view_kind") == "kanban"
             and isinstance(title, str)
             and title.strip()
+            and view_kind is not None
         ):
-            available.append(HookView(project_view_id=view_id, title=title.strip()))
+            available.append(
+                HookView(
+                    project_view_id=view_id,
+                    title=title.strip(),
+                    view_kind=view_kind,
+                )
+            )
     return tuple(available)
 
 

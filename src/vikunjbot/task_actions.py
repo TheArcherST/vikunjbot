@@ -16,6 +16,14 @@ class TaskActions:
     comment: str
 
 
+class PartialTaskActionError(VikunjaAPIError):
+    """A later API call failed after earlier task mutations were confirmed."""
+
+    def __init__(self, completed: tuple[str, ...], cause: VikunjaAPIError):
+        super().__init__(cause.status_code, cause.detail)
+        self.completed = completed
+
+
 def parse_task_actions(text: str) -> TaskActions:
     labels = tuple(match["label"] for match in _LABEL_RE.finditer(text))
     assignees = tuple(match["username"] for match in _ASSIGNEE_RE.finditer(text))
@@ -30,41 +38,46 @@ async def apply_task_actions(
     """Toggle explicit labels/assignees, then add remaining text as a comment."""
 
     completed: list[str] = []
-    if actions.labels:
-        current_labels = await client.task_labels(task_id)
-        by_title = {
-            str(label.get("title")).casefold(): int(label["id"])
-            for label in current_labels
-            if isinstance(label.get("id"), int) and isinstance(label.get("title"), str)
-        }
-        for title in dict.fromkeys(actions.labels):
-            label_id = await _label_id(client, title)
-            if label_id in by_title.values():
-                await client.remove_task_label(task_id, label_id)
-                completed.append(f"removed label *{title}")
-                by_title = {key: value for key, value in by_title.items() if value != label_id}
-            else:
-                await client.add_task_label(task_id, label_id)
-                completed.append(f"added label *{title}")
-                by_title[title.casefold()] = label_id
-    if actions.assignees:
-        current_assignees = await client.task_assignees(task_id)
-        assigned_ids = {
-            int(user["id"]) for user in current_assignees if isinstance(user.get("id"), int)
-        }
-        for username in dict.fromkeys(actions.assignees):
-            user_id = await _user_id(client, username)
-            if user_id in assigned_ids:
-                await client.remove_task_assignee(task_id, user_id)
-                assigned_ids.remove(user_id)
-                completed.append(f"unassigned @{username}")
-            else:
-                await client.add_task_assignee(task_id, user_id)
-                assigned_ids.add(user_id)
-                completed.append(f"assigned @{username}")
-    if actions.comment:
-        await client.add_task_comment(task_id, actions.comment)
-        completed.append("added a comment")
+    try:
+        if actions.labels:
+            current_labels = await client.task_labels(task_id)
+            by_title = {
+                str(label.get("title")).casefold(): int(label["id"])
+                for label in current_labels
+                if isinstance(label.get("id"), int) and isinstance(label.get("title"), str)
+            }
+            for title in dict.fromkeys(actions.labels):
+                label_id = await _label_id(client, title)
+                if label_id in by_title.values():
+                    await client.remove_task_label(task_id, label_id)
+                    completed.append(f"removed label *{title}")
+                    by_title = {key: value for key, value in by_title.items() if value != label_id}
+                else:
+                    await client.add_task_label(task_id, label_id)
+                    completed.append(f"added label *{title}")
+                    by_title[title.casefold()] = label_id
+        if actions.assignees:
+            current_assignees = await client.task_assignees(task_id)
+            assigned_ids = {
+                int(user["id"]) for user in current_assignees if isinstance(user.get("id"), int)
+            }
+            for username in dict.fromkeys(actions.assignees):
+                user_id = await _user_id(client, username)
+                if user_id in assigned_ids:
+                    await client.remove_task_assignee(task_id, user_id)
+                    assigned_ids.remove(user_id)
+                    completed.append(f"unassigned @{username}")
+                else:
+                    await client.add_task_assignee(task_id, user_id)
+                    assigned_ids.add(user_id)
+                    completed.append(f"assigned @{username}")
+        if actions.comment:
+            await client.add_task_comment(task_id, actions.comment)
+            completed.append("added a comment")
+    except VikunjaAPIError as exc:
+        if completed:
+            raise PartialTaskActionError(tuple(completed), exc) from exc
+        raise
     return completed
 
 

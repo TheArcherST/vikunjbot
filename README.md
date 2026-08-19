@@ -206,18 +206,19 @@ submitted token once and stores only a Fernet-encrypted form in its dedicated
 PostgreSQL database.
 
 In the private chat or group that will be the delivery destination, send
-`/webhook <project-id> [kanban-view-ids]`. It gives a webhook URL to paste into that
+`/webhook <project-id> [view-ids]`. It gives a webhook URL to paste into that
 Vikunja project. For example,
-`/webhook 12 4,9` tracks Kanban views 4 and 9. `/install_webhook <project-id>
-[kanban-view-ids]` creates the same project webhook via the connected user's API
-token. Use `/views <project-id>` to list the project's Kanban view IDs.
+`/webhook 12 4,9` tracks project views 4 and 9. `/install_webhook <project-id>
+[view-ids]` creates the same project webhook via the connected user's API token.
+Use `/views <project-id>` to list all supported list, table, Gantt, and Kanban view IDs.
 
 Use `/hooks` in a private chat to open the inline hook manager. It lists hooks owned 
 by the current Telegram account and allows the owner to enable or disable delivery,
-choose the action-permission window, select Kanban views, and choose which task fields
+choose the action-permission window, select project views, optionally restrict delivery
+to tasks visible in any selected view, and choose which task fields
 are rendered, or permanently retire the hook after an explicit confirmation. Deletion
-keeps existing Telegram messages and audit history, stops the route, and makes a
-best-effort attempt to remove the matching project webhook from Vikunja. A hook is owned
+keeps existing Telegram messages and audit history and stops the route only after Vikunja
+confirms the matching project webhook is absent. A hook is owned
 by the Telegram account that created its route; changing or deleting a hook always
 rechecks that ownership in the database.
 
@@ -226,7 +227,7 @@ messages. For a **channel with a linked discussion**, add the bot as a channel
 administrator with permission to post, and as an administrator in the linked discussion
 group too.
 Then, in a private chat with the bot, forward any post from that channel and reply to
-it with `/install_channel_webhook <project-id> [kanban-view-ids]`.
+it with `/install_channel_webhook <project-id> [view-ids]`.
 
 The bot verifies that the requester is a channel administrator, that the channel
 actually has a linked discussion, and that the bot can post in both required places.
@@ -244,7 +245,7 @@ http://vikunjbot-event-relay:8080/events/8b3f07eb-2ec0-4c5c-9bc5-b50f41239705
 
 The UUID is only a lookup key. The database holds the hook configuration: project,
 delivery destination (a Telegram chat and optional linked discussion), the Telegram
-users allowed to act, its event TTL, and the Kanban views selected for that delivery
+users allowed to act, its event TTL, and the project views selected for that delivery
 destination. Unknown or inactive identifiers receive `404`; payloads are not accepted
 by the internal sink. The durable ingress intentionally accepts every request under
 `/events/` first; when the sink rejects a route, Redpanda Connect retains and retries
@@ -290,6 +291,16 @@ discussion relationship; the original channel post is edited instead.
 When Vikunja deletes a task, its persistent Telegram message is changed to `🗑 Deleted`
 and becomes non-actionable. A delayed update cannot revive that mapping.
 
+When view delivery filtering is enabled, selected views are combined with OR semantics.
+The worker asks Vikunja whether the task is currently visible through each view's own
+filter. A confirmed absence from every selected view makes an event an intentional
+filtered outcome; an API failure is retried and never treated as absence. A previously
+published task which leaves all selected views is marked non-actionable in Telegram.
+The same message is restored if a later event places the task back in a selected view.
+Project events and task deletion events are not suppressed by this filter.
+Membership is re-evaluated when a task-related webhook arrives. A view filter whose
+truth changes only as time passes needs another task event before Telegram reflects it.
+
 When a task is completed, the bot also sets its own `✅` reaction on the persistent
 task message; it removes that reaction if the task is reopened. This is a visual
 indicator only — Vikunja remains the source of truth. The reaction must be allowed in
@@ -301,17 +312,17 @@ notifications. They do not represent a task and therefore have no reply-to-act m
 
 ## Optional `vikunjbot` service account
 
-Kanban bucket names belong to a specific view. When a hook selects Kanban views, the
-bot obtains the task's current `expand=buckets` state from Vikunja and renders a
-separate bucket line for every selected view. This avoids borrowing the bucket title
-from whichever view happened to send the webhook. Create a dedicated Vikunja account
+Kanban bucket names belong to a specific view. A hook may select list, table, Gantt, and
+Kanban views; bucket lines are rendered for matching Kanban views when Vikunja returns
+that context. This avoids borrowing the bucket title from whichever view happened to
+send the webhook. Create a dedicated Vikunja account
 named `vikunjbot`, grant it read access to the relevant projects, issue an API token,
 and set `VIKUNJBOT_SERVICE_TOKEN`. It is used only for that read-only enrichment and
 never for a user-requested write.
 
 Without selected views, the bot retains the webhook's single generic bucket when it
-can identify it unambiguously. Without a service token, configuring selected views is
-rejected, rather than silently showing stale or ambiguous columns.
+can identify it unambiguously. Without a service token, configuring selected views or
+view delivery filtering is rejected rather than silently using stale or ambiguous state.
 
 ## Reliability model
 

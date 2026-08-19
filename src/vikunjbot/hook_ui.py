@@ -6,7 +6,8 @@ from uuid import UUID
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from vikunjbot.database import Hook
+from vikunjbot.database import Hook, HookView
+from vikunjbot.project_views import ProjectViewKind
 from vikunjbot.task_fields import TASK_DISPLAY_FIELD_LABELS, TaskDisplayField
 
 HOOKS_PAGE_SIZE = 6
@@ -60,12 +61,14 @@ def hook_panel(hook: Hook) -> tuple[str, InlineKeyboardMarkup]:
         if field in hook.task_display_fields
     )
     views = ", ".join(html.escape(view.title) for view in hook.views) or "all task events"
+    delivery_filter = "selected views (OR)" if hook.filter_by_views else "off"
     text = (
         f"<b>Hook for project {hook.project_id}</b>\n\n"
         f"Status: <b>{state}</b>\n"
         f"Destination: <code>{hook.delivery_destination.chat_id}</code>\n"
         f"Action window: <b>{format_ttl(hook.event_permission_ttl_seconds)}</b>\n"
         f"Views: {views}\n"
+        f"Delivery filter: <b>{delivery_filter}</b>\n"
         f"Task fields: {html.escape(fields or 'title only')}\n\n"
         f"Hook ID: <code>{hook.id}</code>"
     )
@@ -81,7 +84,7 @@ def hook_panel(hook: Hook) -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton(text="⏱ Action window", callback_data=f"hk:t:{hook.id}"),
                 InlineKeyboardButton(text="🧩 Task fields", callback_data=f"hk:f:{hook.id}"),
             ],
-            [InlineKeyboardButton(text="🗂 Kanban views", callback_data=f"hk:w:{hook.id}")],
+            [InlineKeyboardButton(text="🗂 Project views", callback_data=f"hk:w:{hook.id}")],
             [InlineKeyboardButton(text="🗑 Delete hook", callback_data=f"hk:d:{hook.id}")],
             [InlineKeyboardButton(text="‹ All hooks", callback_data="hk:l:0")],
         ]
@@ -154,26 +157,38 @@ def fields_panel(hook: Hook) -> tuple[str, InlineKeyboardMarkup]:
 
 
 def views_panel(
-    hook: Hook, available_views: tuple[tuple[int, str], ...]
+    hook: Hook, available_views: tuple[HookView, ...]
 ) -> tuple[str, InlineKeyboardMarkup]:
     selected_ids = {view.project_view_id for view in hook.views}
     rows = [
         [
             InlineKeyboardButton(
-                text=("✅ " if view_id in selected_ids else "▫️ ") + title,
-                callback_data=f"hk:wt:{hook.id}:{view_id}",
+                text=("✅ " if view.project_view_id in selected_ids else "▫️ ")
+                + _view_kind_label(view.view_kind)
+                + " · "
+                + view.title,
+                callback_data=f"hk:wt:{hook.id}:{view.project_view_id}",
             )
         ]
-        for view_id, title in available_views
+        for view in available_views
     ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=("✅ " if hook.filter_by_views else "▫️ ")
+                + "Deliver only matching tasks",
+                callback_data=f"hk:wf:{hook.id}",
+            )
+        ]
+    )
     rows.append([InlineKeyboardButton(text="Done", callback_data=f"hk:v:{hook.id}")])
     text = (
-        "<b>Kanban views</b>\n\n"
-        "Select the views whose bucket names should be shown. With none selected, "
-        "the task's generic bucket is used."
+        "<b>Project views</b>\n\n"
+        "Selected views provide their task and bucket context. Enable delivery filtering to "
+        "deliver a task only while it is visible in at least one selected view."
     )
     if not available_views:
-        text += "\n\nThis project has no Kanban views."
+        text += "\n\nThis project has no views."
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -195,3 +210,12 @@ def format_ttl(seconds: int) -> str:
 def _destination_label(hook: Hook) -> str:
     suffix = " + discussion" if hook.delivery_destination.discussion_chat_id is not None else ""
     return f"{hook.delivery_destination.chat_id}{suffix}"
+
+
+def _view_kind_label(kind: ProjectViewKind) -> str:
+    return {
+        ProjectViewKind.LIST: "List",
+        ProjectViewKind.TABLE: "Table",
+        ProjectViewKind.GANTT: "Gantt",
+        ProjectViewKind.KANBAN: "Kanban",
+    }[kind]

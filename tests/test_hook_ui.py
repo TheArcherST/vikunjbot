@@ -32,7 +32,7 @@ def test_hook_panels_use_compact_valid_callback_payloads() -> None:
         hook_panel(hook),
         delete_hook_confirmation_panel(hook),
         fields_panel(hook),
-        views_panel(hook, ((3, "Development"), (8, "Release"))),
+        views_panel(hook, (HookView(3, "Development"), HookView(8, "Release"))),
     )
 
     callback_data = [
@@ -45,6 +45,7 @@ def test_hook_panels_use_compact_valid_callback_payloads() -> None:
 
     assert callback_data
     assert all(value.startswith("hk:") and len(value.encode()) <= 64 for value in callback_data)
+    assert f"hk:wf:{hook.id}" in callback_data
 
 
 def test_hook_deletion_requires_an_explicit_confirmation() -> None:

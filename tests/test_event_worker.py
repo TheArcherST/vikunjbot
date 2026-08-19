@@ -10,9 +10,11 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import SendMessage
 from aiogram.types import ReactionTypeEmoji
 
-from vikunjbot.database import Database, DeliveryDestination
+from vikunjbot.database import Database, DeliveryDestination, HookView
 from vikunjbot.event_worker import EventWorker
+from vikunjbot.project_views import ProjectViewKind
 from vikunjbot.settings import Settings
+from vikunjbot.vikunja import VikunjaAPIError
 
 
 @dataclass
@@ -140,6 +142,29 @@ async def test_project_events_are_forwarded_without_a_task_mapping(
     assert bot.sent == [(12, "📁 <b>Roadmap</b> updated.")]
 
 
+async def test_view_filter_does_not_suppress_project_events(
+    config: Settings, database: Database
+) -> None:
+    hook = await database.create_hook(
+        project_id=5,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(HookView(7, "Completed", ProjectViewKind.TABLE),),
+        filter_by_views=True,
+    )
+    payload = {
+        "event_name": "project.updated",
+        "time": datetime.now(UTC).isoformat(),
+        "data": {"project": {"id": 5, "title": "Roadmap"}},
+    }
+    await database.enqueue_event(hook.id, json.dumps(payload).encode(), payload)
+    bot = FakeBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+
+    assert await worker.process_one() is True
+    assert bot.sent == [(12, "📁 <b>Roadmap</b> updated.")]
+
+
 async def test_channel_route_publishes_in_the_channel_and_records_its_discussion(
     config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
 ) -> None:
@@ -234,3 +259,130 @@ async def test_untracked_task_deletion_is_a_notification_not_an_actionable_messa
     assert await worker.process_one() is True
     assert bot.sent == [(12, "<b>DEMO-42: Write tests</b>\n🗑 Deleted")]
     assert await database.find_task_message_in_delivery_destination(12, 101) is None
+
+
+class ViewMembershipClient:
+    def __init__(self, visibility: list[bool]) -> None:
+        self.visibility = visibility
+
+    async def task_in_project_view(
+        self, project_id: int, view_id: int, task_id: int
+    ) -> dict[str, Any] | None:
+        assert (project_id, view_id, task_id) == (1, 7, 42)
+        visible = self.visibility.pop(0)
+        if not visible:
+            return None
+        return {
+            "id": 42,
+            "title": "Visible task",
+            "identifier": "DEMO-42",
+            "done": False,
+            "labels": [],
+            "assignees": [],
+        }
+
+
+async def test_view_filter_revokes_and_restores_the_same_task_message(
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    hook = await database.create_hook(
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(HookView(7, "Completed table", ProjectViewKind.TABLE),),
+        filter_by_views=True,
+    )
+    for index, event_name in enumerate(("task.created", "task.updated", "task.updated")):
+        payload = event_payload(event_name=event_name, title=f"Event version {index}")
+        await database.enqueue_event(hook.id, json.dumps(payload).encode(), payload)
+    bot = FakeBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+    worker._enricher._client = ViewMembershipClient([True, False, True])  # type: ignore[assignment]
+
+    assert await worker.process_one() is True
+    assert bot.sent == [(12, "<b>DEMO-42: Visible task</b>\n⬜ Open")]
+    assert await database.find_task_message_in_delivery_destination(12, 101) is not None
+
+    assert await worker.process_one() is True
+    assert bot.edited[-1] == (
+        12,
+        101,
+        "<s><b>DEMO-42: Visible task</b>\n⬜ Open</s>\n"
+        "<i>This task is no longer visible in the selected delivery views.</i>",
+    )
+    filtered = await database.get_task_message(hook.id, 42)
+    assert filtered is not None and filtered.filtered_out is True
+    assert await database.find_task_message_in_delivery_destination(12, 101) is None
+
+    assert await worker.process_one() is True
+    assert bot.edited[-1] == (12, 101, "<b>DEMO-42: Visible task</b>\n⬜ Open")
+    restored = await database.get_task_message(hook.id, 42)
+    assert restored is not None and restored.filtered_out is False
+    assert len(bot.sent) == 1
+
+
+class FailingViewMembershipClient:
+    async def task_in_project_view(
+        self, project_id: int, view_id: int, task_id: int
+    ) -> dict[str, Any] | None:
+        raise VikunjaAPIError(503, "Vikunja is unavailable")
+
+
+class PartiallyAvailableViewClient:
+    async def task_in_project_view(
+        self, project_id: int, view_id: int, task_id: int
+    ) -> dict[str, Any] | None:
+        if view_id == 7:
+            raise VikunjaAPIError(503, "one view is unavailable")
+        return {
+            "id": task_id,
+            "title": "Matched elsewhere",
+            "identifier": "DEMO-42",
+            "done": False,
+            "labels": [],
+            "assignees": [],
+        }
+
+
+async def test_view_filter_api_failure_retries_instead_of_dropping(
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    hook = await database.create_hook(
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(HookView(7, "Important", ProjectViewKind.LIST),),
+        filter_by_views=True,
+    )
+    payload = event_payload()
+    await database.enqueue_event(hook.id, json.dumps(payload).encode(), payload)
+    bot = FakeBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+    worker._enricher._client = FailingViewMembershipClient()  # type: ignore[assignment]
+
+    assert await worker.process_one() is True
+    assert bot.sent == []
+    assert await worker.process_one() is False
+
+
+async def test_one_confirmed_view_match_is_enough_when_another_view_fails(
+    config: Settings, database: Database, event_payload: Callable[..., dict[str, Any]]
+) -> None:
+    hook = await database.create_hook(
+        project_id=1,
+        delivery_destination=DeliveryDestination(chat_id=12),
+        allowed_telegram_user_ids=frozenset({12}),
+        views=(
+            HookView(7, "Unavailable", ProjectViewKind.LIST),
+            HookView(8, "Matching", ProjectViewKind.GANTT),
+        ),
+        filter_by_views=True,
+    )
+    payload = event_payload()
+    await database.enqueue_event(hook.id, json.dumps(payload).encode(), payload)
+    bot = FakeBot()
+    worker = EventWorker(bot, database, config)  # type: ignore[arg-type]
+    worker._enricher._client = PartiallyAvailableViewClient()  # type: ignore[assignment]
+
+    assert await worker.process_one() is True
+    assert bot.sent == [(12, "<b>DEMO-42: Matched elsewhere</b>\n⬜ Open")]
