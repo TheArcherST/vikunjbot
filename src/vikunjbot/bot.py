@@ -8,16 +8,37 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.filters.command import CommandObject
-from aiogram.types import BotCommand, Message, MessageOriginChannel
+from aiogram.types import (
+    BotCommand,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    Message,
+    MessageOriginChannel,
+)
 
+from vikunjbot.authorization import (
+    AuthorizationDenialReason,
+    DeliveryDestinationAction,
+    DeliveryDestinationAuthorizationService,
+    TelegramActor,
+    task_action_grants,
+)
 from vikunjbot.database import Database, DeliveryDestination, HookView, TaskMessage
 from vikunjbot.event_worker import EventWorker
+from vikunjbot.hook_ui import (
+    fields_panel,
+    hook_panel,
+    hooks_list_panel,
+    parse_hook_id,
+    ttl_panel,
+    views_panel,
+)
 from vikunjbot.settings import Settings, settings
 from vikunjbot.task_actions import apply_task_actions, parse_task_actions
-from vikunjbot.timeutils import utc_now
+from vikunjbot.task_fields import TaskDisplayField
 from vikunjbot.tokens import (
     TelegramInteraction,
     TokenBindingError,
@@ -77,6 +98,7 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
         TokenCipher(config.token_encryption_key),
         config.vikunja_api_base_url,
     )
+    authorization_service = DeliveryDestinationAuthorizationService(database)
     router = Router(name="vikunjbot")
 
     @router.message(Command("start"))
@@ -88,7 +110,8 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
             "remaining text becomes a comment.\n\n"
             f"Use {_VIEWS_COMMAND} to list a project's Kanban views. Then use "
             f"{_WEBHOOK_COMMAND} to get a webhook URL, or {_INSTALL_WEBHOOK_COMMAND} "
-            "to create it through your bound account. To publish into a channel and its linked "
+            "to create it through your bound account. Use /hooks to manage your routes. "
+            "To publish into a channel and its linked "
             "discussion, forward a channel post here and reply with\n"
             f"{_INSTALL_CHANNEL_WEBHOOK_COMMAND}."
         )
@@ -271,6 +294,132 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
     async def disable_comment_updates(message: Message) -> None:
         await _set_comment_updates(bot, database, message, enabled=False)
 
+    @router.message(Command("hooks"))
+    async def hooks(message: Message) -> None:
+        if not _is_private_chat(message.chat.type) or message.from_user is None:
+            await message.answer("For your security, manage hooks in a private chat with the bot.")
+            return
+        owned = await authorization_service.owned_hooks(TelegramActor(message.from_user.id))
+        text, keyboard = hooks_list_panel(owned)
+        await message.answer(text, reply_markup=keyboard)
+
+    @router.callback_query(F.data.startswith("hk:"))
+    async def manage_hook(callback: CallbackQuery) -> None:
+        if callback.message is None or not isinstance(callback.message, Message):
+            await callback.answer("This panel is no longer available.", show_alert=True)
+            return
+        data = callback.data or ""
+        parts = data.split(":")
+        actor = TelegramActor(callback.from_user.id)
+        try:
+            if len(parts) == 3 and parts[1] == "l":
+                owned = await authorization_service.owned_hooks(actor)
+                text, keyboard = hooks_list_panel(owned, int(parts[2]))
+                await _edit_hook_panel(callback, text, keyboard)
+                return
+
+            hook_id = parse_hook_id(parts[2])
+            hook = await authorization_service.owned_hook(actor, hook_id)
+            if hook is None:
+                await callback.answer("You do not own this hook.", show_alert=True)
+                return
+
+            notice: str | None = None
+            if len(parts) == 3 and parts[1] == "v":
+                panel = hook_panel(hook)
+            elif len(parts) == 3 and parts[1] == "a":
+                updated = await database.update_owned_hook(
+                    hook.id,
+                    actor.user_id,
+                    active=not hook.active,
+                )
+                if updated is None:  # pragma: no cover - protected by ownership check above
+                    raise RuntimeError("hook ownership changed during update")
+                panel = hook_panel(updated)
+                notice = "Hook enabled." if updated.active else "Hook disabled."
+            elif len(parts) == 3 and parts[1] == "t":
+                panel = ttl_panel(hook)
+            elif len(parts) == 4 and parts[1] == "ts":
+                updated = await database.update_owned_hook(
+                    hook.id,
+                    actor.user_id,
+                    event_permission_ttl_seconds=int(parts[3]),
+                )
+                if updated is None:  # pragma: no cover - protected by ownership check above
+                    raise RuntimeError("hook ownership changed during update")
+                panel = ttl_panel(updated)
+                notice = "Action window updated."
+            elif len(parts) == 3 and parts[1] == "f":
+                panel = fields_panel(hook)
+            elif len(parts) == 4 and parts[1] == "ft":
+                field = TaskDisplayField(parts[3])
+                selected = set(hook.task_display_fields)
+                if field in selected:
+                    selected.remove(field)
+                else:
+                    selected.add(field)
+                updated = await database.update_owned_hook(
+                    hook.id,
+                    actor.user_id,
+                    task_display_fields=frozenset(selected),
+                )
+                if updated is None:  # pragma: no cover - protected by ownership check above
+                    raise RuntimeError("hook ownership changed during update")
+                panel = fields_panel(updated)
+            elif len(parts) == 3 and parts[1] == "w":
+                client = await token_service.client_for_telegram_action(
+                    TelegramInteraction(actor.user_id)
+                )
+                available = await _available_kanban_views(client, hook.project_id)
+                panel = views_panel(
+                    hook,
+                    tuple((view.project_view_id, view.title) for view in available),
+                )
+            elif len(parts) == 4 and parts[1] == "wt":
+                client = await token_service.client_for_telegram_action(
+                    TelegramInteraction(actor.user_id)
+                )
+                available = await _available_kanban_views(client, hook.project_id)
+                available_by_id = {view.project_view_id: view for view in available}
+                toggled_id = int(parts[3])
+                if toggled_id not in available_by_id:
+                    raise ValueError("Kanban view no longer exists")
+                selected_ids = {view.project_view_id for view in hook.views}
+                if toggled_id in selected_ids:
+                    selected_ids.remove(toggled_id)
+                else:
+                    if not config.vikunjbot_service_token:
+                        raise HookConfigurationError(
+                            "VIKUNJBOT_SERVICE_TOKEN is required to display Kanban views"
+                        )
+                    selected_ids.add(toggled_id)
+                selected_views = tuple(
+                    view for view in available if view.project_view_id in selected_ids
+                )
+                updated = await database.replace_owned_hook_views(
+                    hook.id,
+                    actor.user_id,
+                    selected_views,
+                )
+                if updated is None:  # pragma: no cover - protected by ownership check above
+                    raise RuntimeError("hook ownership changed during update")
+                panel = views_panel(
+                    updated,
+                    tuple((view.project_view_id, view.title) for view in available),
+                )
+            else:
+                raise ValueError("unknown hook panel action")
+        except (HookConfigurationError, TokenBindingError, TokenIdentityChangedError) as exc:
+            await callback.answer(str(exc), show_alert=True)
+            return
+        except VikunjaAPIError as exc:
+            await callback.answer(_api_error_message(exc), show_alert=True)
+            return
+        except (IndexError, TypeError, ValueError):
+            await callback.answer("This button is invalid or outdated.", show_alert=True)
+            return
+        await _edit_hook_panel(callback, *panel, notice=notice)
+
     @router.message(F.reply_to_message, F.text)
     async def task_message_reply(message: Message) -> None:
         if message.from_user is None or message.reply_to_message is None or not message.text:
@@ -278,13 +427,23 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
         linked = await _task_message_for_reply(database, message)
         if linked is None:
             return
-        if linked.expires_at <= utc_now():
+        decision = authorization_service.authorize(
+            actor=TelegramActor(message.from_user.id),
+            action=DeliveryDestinationAction.ACT_ON_TASK,
+            destination=linked.delivery_destination,
+            grants=task_action_grants(
+                destination=linked.delivery_destination,
+                telegram_user_ids=linked.allowed_telegram_user_ids,
+                expires_at=linked.expires_at,
+            ),
+        )
+        if decision.denial_reason == AuthorizationDenialReason.GRANT_EXPIRED:
             await message.reply("This event permission has expired; create a fresh webhook route.")
             return
-        if not linked.allowed_telegram_user_ids:
+        if decision.denial_reason == AuthorizationDenialReason.NO_GRANTS:
             await message.reply("This channel route is read-only: it has no Telegram actor grant.")
             return
-        if message.from_user.id not in linked.allowed_telegram_user_ids:
+        if not decision.allowed:
             await message.reply(
                 "This route does not grant your Telegram account access to this task."
             )
@@ -308,6 +467,24 @@ def create_dispatcher(bot: Bot, database: Database, config: Settings) -> Dispatc
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
     return dispatcher
+
+
+async def _edit_hook_panel(
+    callback: CallbackQuery,
+    text: str,
+    keyboard: InlineKeyboardMarkup,
+    *,
+    notice: str | None = None,
+) -> None:
+    if callback.message is None or not isinstance(callback.message, Message):
+        await callback.answer("This panel is no longer available.", show_alert=True)
+        return
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await callback.answer(notice)
 
 
 async def _set_comment_updates(
@@ -411,6 +588,7 @@ async def _create_hook_target(
         )
     hook = await database.create_hook(
         project_id=project_id,
+        owner_telegram_user_id=telegram_user_id,
         delivery_destination=delivery_destination,
         allowed_telegram_user_ids=frozenset({telegram_user_id}),
         views=views,
@@ -424,21 +602,36 @@ async def _selected_kanban_views(
     if not view_ids:
         return ()
     available = {
-        int(view["id"]): view
-        for view in await client.project_views(project_id)
-        if isinstance(view.get("id"), int) and view.get("view_kind") == "kanban"
+        view.project_view_id: view for view in await _available_kanban_views(client, project_id)
     }
     selected: list[HookView] = []
     for view_id in view_ids:
         view = available.get(view_id)
-        title = view.get("title") if view is not None else None
-        if not isinstance(title, str) or not title.strip():
+        if view is None:
             raise HookConfigurationError(
                 f"Kanban view {view_id} does not exist in project {project_id}; "
                 f"use {_VIEWS_COMMAND} to list available views"
             )
-        selected.append(HookView(project_view_id=view_id, title=title.strip()))
+        selected.append(view)
     return tuple(selected)
+
+
+async def _available_kanban_views(
+    client: VikunjaClient, project_id: int
+) -> tuple[HookView, ...]:
+    available: list[HookView] = []
+    for view in await client.project_views(project_id):
+        view_id = view.get("id")
+        title = view.get("title")
+        if (
+            isinstance(view_id, int)
+            and view_id > 0
+            and view.get("view_kind") == "kanban"
+            and isinstance(title, str)
+            and title.strip()
+        ):
+            available.append(HookView(project_view_id=view_id, title=title.strip()))
+    return tuple(available)
 
 
 async def _task_message_for_reply(database: Database, message: Message) -> TaskMessage | None:
@@ -508,6 +701,7 @@ async def run_bot(config: Settings = settings) -> None:
             BotCommand(command="webhook", description="Show a webhook target URL"),
             BotCommand(command="views", description="List project Kanban views"),
             BotCommand(command="install_webhook", description="Create a project webhook"),
+            BotCommand(command="hooks", description="Manage your webhook routes"),
             BotCommand(
                 command="install_channel_webhook", description="Connect a channel and discussion"
             ),

@@ -23,6 +23,7 @@ from vikunjbot.db_models import (
     TaskMessageModel,
     TokenBindingModel,
 )
+from vikunjbot.task_fields import ALL_TASK_DISPLAY_FIELDS, TaskDisplayField
 from vikunjbot.timeutils import exponential_backoff, parse_event_time, utc_now
 
 
@@ -55,9 +56,12 @@ class DeliveryDestination:
 class Hook:
     id: UUID
     project_id: int
+    owner_telegram_user_id: int | None
     delivery_destination: DeliveryDestination
     allowed_telegram_user_ids: frozenset[int]
     event_permission_ttl_seconds: int
+    task_display_fields: frozenset[TaskDisplayField]
+    active: bool
     views: tuple[HookView, ...]
 
 
@@ -101,6 +105,7 @@ class Database:
         self,
         *,
         project_id: int,
+        owner_telegram_user_id: int | None = None,
         delivery_destination: DeliveryDestination,
         allowed_telegram_user_ids: frozenset[int],
         views: tuple[HookView, ...],
@@ -109,10 +114,12 @@ class Database:
         now = utc_now()
         record = HookModel(
             project_id=project_id,
+            owner_telegram_user_id=owner_telegram_user_id,
             delivery_destination_chat_id=delivery_destination.chat_id,
             delivery_destination_discussion_chat_id=delivery_destination.discussion_chat_id,
             allowed_telegram_user_ids=sorted(allowed_telegram_user_ids),
             event_permission_ttl_seconds=event_permission_ttl_seconds,
+            task_display_fields=[field.value for field in sorted(ALL_TASK_DISPLAY_FIELDS)],
             created_at=now,
             updated_at=now,
             views=[
@@ -137,6 +144,90 @@ class Database:
                 .where(HookModel.id == hook_id, HookModel.active.is_(True))
             )
         return _hook(record) if record is not None else None
+
+    async def get_hook(self, hook_id: UUID) -> Hook | None:
+        async with self._sessions() as session:
+            record = await session.scalar(
+                select(HookModel)
+                .options(selectinload(HookModel.views))
+                .where(HookModel.id == hook_id)
+            )
+        return _hook(record) if record is not None else None
+
+    async def list_hooks_owned_by_telegram_user(self, telegram_user_id: int) -> tuple[Hook, ...]:
+        async with self._sessions() as session:
+            records = await session.scalars(
+                select(HookModel)
+                .options(selectinload(HookModel.views))
+                .where(HookModel.owner_telegram_user_id == telegram_user_id)
+                .order_by(HookModel.created_at.desc(), HookModel.id)
+            )
+            hooks = records.unique().all()
+        return tuple(_hook(record) for record in hooks)
+
+    async def update_owned_hook(
+        self,
+        hook_id: UUID,
+        owner_telegram_user_id: int,
+        *,
+        active: bool | None = None,
+        event_permission_ttl_seconds: int | None = None,
+        task_display_fields: frozenset[TaskDisplayField] | None = None,
+    ) -> Hook | None:
+        values: dict[str, object] = {"updated_at": utc_now()}
+        if active is not None:
+            values["active"] = active
+        if event_permission_ttl_seconds is not None:
+            if event_permission_ttl_seconds <= 0:
+                raise ValueError("event permission TTL must be positive")
+            values["event_permission_ttl_seconds"] = event_permission_ttl_seconds
+        if task_display_fields is not None:
+            values["task_display_fields"] = [field.value for field in sorted(task_display_fields)]
+        async with self._sessions.begin() as session:
+            updated_id = await session.scalar(
+                update(HookModel)
+                .where(
+                    HookModel.id == hook_id,
+                    HookModel.owner_telegram_user_id == owner_telegram_user_id,
+                )
+                .values(**values)
+                .returning(HookModel.id)
+            )
+        if updated_id is None:
+            return None
+        return await self.get_hook(updated_id)
+
+    async def replace_owned_hook_views(
+        self,
+        hook_id: UUID,
+        owner_telegram_user_id: int,
+        views: tuple[HookView, ...],
+    ) -> Hook | None:
+        async with self._sessions.begin() as session:
+            record = await session.scalar(
+                select(HookModel)
+                .options(selectinload(HookModel.views))
+                .where(
+                    HookModel.id == hook_id,
+                    HookModel.owner_telegram_user_id == owner_telegram_user_id,
+                )
+                .with_for_update()
+            )
+            if record is None:
+                return None
+            record.views.clear()
+            await session.flush()
+            record.views.extend(
+                HookViewModel(
+                    project_view_id=view.project_view_id,
+                    title=view.title,
+                    display_order=index,
+                )
+                for index, view in enumerate(views)
+            )
+            record.updated_at = utc_now()
+            await session.flush()
+        return await self.get_hook(hook_id)
 
     async def enqueue_event(
         self, hook_id: UUID, raw_body: bytes, payload: dict[str, Any]
@@ -424,12 +515,17 @@ def _hook(record: HookModel) -> Hook:
     return Hook(
         id=record.id,
         project_id=record.project_id,
+        owner_telegram_user_id=record.owner_telegram_user_id,
         delivery_destination=DeliveryDestination(
             chat_id=record.delivery_destination_chat_id,
             discussion_chat_id=record.delivery_destination_discussion_chat_id,
         ),
         allowed_telegram_user_ids=frozenset(record.allowed_telegram_user_ids),
         event_permission_ttl_seconds=record.event_permission_ttl_seconds,
+        task_display_fields=frozenset(
+            TaskDisplayField(field) for field in record.task_display_fields
+        ),
+        active=record.active,
         views=tuple(
             HookView(project_view_id=view.project_view_id, title=view.title)
             for view in record.views

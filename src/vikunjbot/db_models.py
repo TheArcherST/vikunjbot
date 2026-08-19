@@ -42,12 +42,14 @@ class HookModel(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    owner_telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     delivery_destination_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     delivery_destination_discussion_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     allowed_telegram_user_ids: Mapped[list[int]] = mapped_column(JSONValue, nullable=False)
     event_permission_ttl_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, default=86_400
     )
+    task_display_fields: Mapped[list[str]] = mapped_column(JSONValue, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

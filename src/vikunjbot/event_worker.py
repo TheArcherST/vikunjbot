@@ -133,7 +133,7 @@ class EventWorker:
         if existing is not None and existing.deleted:
             logger.info("Ignoring event %s for deleted task %s", event.id, event.task_id)
             return
-        text = render_task(task, hook.views)
+        text = render_task(task, hook.views, hook.task_display_fields)
         if existing is None:
             sent = await self._bot.send_message(
                 chat_id=hook.delivery_destination.chat_id,
@@ -201,14 +201,14 @@ class EventWorker:
                 # never create a reply-to-act mapping for a non-existent task.
                 await self._bot.send_message(
                     chat_id=hook.delivery_destination.chat_id,
-                    text=render_deleted_task(task),
+                    text=render_deleted_task(task, hook.task_display_fields),
                 )
             return
         if existing.deleted:
             return
         try:
             await self._bot.edit_message_text(
-                text=render_deleted_task(existing.snapshot),
+                text=render_deleted_task(existing.snapshot, hook.task_display_fields),
                 chat_id=hook.delivery_destination.chat_id,
                 message_id=existing.message_id,
             )

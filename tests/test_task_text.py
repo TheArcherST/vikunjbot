@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from vikunjbot.database import HookView
 from vikunjbot.event_worker import _merge_event_bucket, _needs_bucket_enrichment
+from vikunjbot.task_fields import TaskDisplayField
 from vikunjbot.task_text import render_deleted_task, render_task, task_snapshot
 
 
@@ -25,6 +26,21 @@ def test_actual_due_date_is_rendered() -> None:
     )
 
     assert "🗓 Due: 2026-08-19 12:30:00 UTC" in rendered
+
+
+def test_task_fields_can_be_hidden_independently_while_title_remains() -> None:
+    rendered = render_task(
+        {
+            "identifier": "DEMO-42",
+            "title": "Minimal task",
+            "done": True,
+            "bucket": {"title": "Done"},
+            "labels": [{"title": "important"}],
+        },
+        display_fields=frozenset({TaskDisplayField.STATUS}),
+    )
+
+    assert rendered == "<b>Minimal task</b>\n✅ Completed"
 
 
 def test_bucket_title_from_expanded_bucket_map_is_forwarded() -> None:

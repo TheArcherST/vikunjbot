@@ -4,6 +4,7 @@ import html
 from typing import Any
 
 from vikunjbot.database import HookView
+from vikunjbot.task_fields import ALL_TASK_DISPLAY_FIELDS, TaskDisplayField
 
 
 def task_snapshot(task: dict[str, Any], views: tuple[HookView, ...] = ()) -> dict[str, Any]:
@@ -21,28 +22,44 @@ def task_snapshot(task: dict[str, Any], views: tuple[HookView, ...] = ()) -> dic
     }
 
 
-def render_task(task: dict[str, Any], views: tuple[HookView, ...] = ()) -> str:
+def render_task(
+    task: dict[str, Any],
+    views: tuple[HookView, ...] = (),
+    display_fields: frozenset[TaskDisplayField] = ALL_TASK_DISPLAY_FIELDS,
+) -> str:
     snapshot = task_snapshot(task, views)
-    heading = _task_heading(snapshot)
-    lines = [heading, "✅ Completed" if snapshot["done"] else "⬜ Open"]
-    if views:
+    heading = _task_heading(
+        snapshot,
+        show_identifier=TaskDisplayField.IDENTIFIER in display_fields,
+    )
+    lines = [heading]
+    if TaskDisplayField.STATUS in display_fields:
+        lines.append("✅ Completed" if snapshot["done"] else "⬜ Open")
+    if views and TaskDisplayField.BUCKET in display_fields:
         for view_title, bucket_title in snapshot["view_buckets"]:
             lines.append(f"📥 {html.escape(view_title)}: {html.escape(bucket_title)}")
-    elif snapshot["bucket"]:
+    elif snapshot["bucket"] and TaskDisplayField.BUCKET in display_fields:
         lines.append(f"📥 Bucket: {html.escape(snapshot['bucket'])}")
-    if snapshot["due_date"]:
+    if snapshot["due_date"] and TaskDisplayField.DUE_DATE in display_fields:
         lines.append(f"🗓 Due: {html.escape(_human_date(snapshot['due_date']))}")
-    if snapshot["labels"]:
+    if snapshot["labels"] and TaskDisplayField.LABELS in display_fields:
         lines.append("🏷 " + ", ".join(html.escape(item) for item in snapshot["labels"]))
-    if snapshot["assignees"]:
+    if snapshot["assignees"] and TaskDisplayField.ASSIGNEES in display_fields:
         lines.append("👤 " + ", ".join(html.escape(item) for item in snapshot["assignees"]))
     return "\n".join(lines)
 
 
-def render_deleted_task(task: dict[str, Any]) -> str:
+def render_deleted_task(
+    task: dict[str, Any],
+    display_fields: frozenset[TaskDisplayField] = ALL_TASK_DISPLAY_FIELDS,
+) -> str:
     """Render a terminal, non-actionable task-deletion notice."""
 
-    return f"{_task_heading(task_snapshot(task))}\n🗑 Deleted"
+    heading = _task_heading(
+        task_snapshot(task),
+        show_identifier=TaskDisplayField.IDENTIFIER in display_fields,
+    )
+    return f"{heading}\n🗑 Deleted"
 
 
 def render_project_event(event_name: str, payload: dict[str, Any]) -> str:
@@ -155,10 +172,10 @@ def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _task_heading(snapshot: dict[str, Any]) -> str:
+def _task_heading(snapshot: dict[str, Any], *, show_identifier: bool = True) -> str:
     title = html.escape(snapshot["title"] or "Untitled task")
     identifier = html.escape(snapshot["identifier"])
-    return f"<b>{identifier}: {title}</b>" if identifier else f"<b>{title}</b>"
+    return f"<b>{identifier}: {title}</b>" if identifier and show_identifier else f"<b>{title}</b>"
 
 
 def _due_date(value: object) -> str:

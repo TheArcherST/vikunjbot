@@ -71,6 +71,28 @@ async def test_migrations_upgrade_an_empty_database_to_head(test_database_url: s
                 )
             ).all()
         )
+        hook_columns = set(
+            (
+                await connection.scalars(
+                    text(
+                        "select column_name from information_schema.columns "
+                        "where table_schema = 'public' and table_name = 'hooks'"
+                    )
+                )
+            ).all()
+        )
+        migrated_hook_settings = (
+            (
+                await connection.execute(
+                    text(
+                        "select owner_telegram_user_id, task_display_fields from hooks "
+                        "where id = '00000000-0000-0000-0000-000000000042'"
+                    )
+                )
+            )
+            .one()
+            ._tuple()
+        )
         migrated_destination = (
             (
                 await connection.execute(
@@ -96,3 +118,13 @@ async def test_migrations_upgrade_an_empty_database_to_head(test_database_url: s
         "deleted",
     } <= task_message_columns
     assert migrated_destination == (-100111, -100222)
+    assert {"owner_telegram_user_id", "task_display_fields"} <= hook_columns
+    assert migrated_hook_settings[0] == 12
+    assert set(migrated_hook_settings[1]) == {
+        "identifier",
+        "status",
+        "bucket",
+        "due_date",
+        "labels",
+        "assignees",
+    }

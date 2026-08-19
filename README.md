@@ -1,7 +1,10 @@
 # vikunjbot
 
-`vikunjbot` connects Vikunja project webhooks with Telegram. It consists of two
-application processes sharing a dedicated PostgreSQL database:
+`vikunjbot` adds Telegram frontend for your Vikunja instance.
+
+## Architecture
+
+It's assumed that you host vikunja via Docker, but an be adapted overwise.
 
 - `vikunjbot-event-relay` accepts Vikunja webhooks on the private Docker network and
   commits them to PostgreSQL before returning `202 Accepted`.
@@ -170,6 +173,12 @@ Vikunja project. For example,
 `/webhook 12 4,9` tracks Kanban views 4 and 9. `/install_webhook <project-id>
 [kanban-view-ids]` creates the same project webhook via the connected user's API
 token. Use `/views <project-id>` to list the project's Kanban view IDs.
+
+Use `/hooks` in a private chat to open the inline hook manager. It lists hooks owned 
+by the current Telegram account and allows the owner to enable or disable delivery,
+choose the action-permission window, select Kanban views, and choose which task fields
+are rendered. A hook is owned by the Telegram account that created its route; changing
+a hook always rechecks that ownership in the database.
 
 For a regular group, add the bot as an administrator so it can post and edit task
 messages. For a **channel with a linked discussion**, add the bot as a channel
